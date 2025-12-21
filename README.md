@@ -99,7 +99,7 @@ python opentinker/environment/math/code_interpreter_math_server.py --port <env_p
 python opentinker/environment/gomoku/gomoku_server.py --port <env_port>
 ```
 
-### 4. Run Training
+### 4. Run Training/Inference (Client Side)
 
 **Math RL:**
 
