@@ -34,7 +34,7 @@
 
 #### Clone the Repository
 ```bash
-git clone --recurse-submodules git@github.com:open-tinker/OpenTinker.git
+git clone --recurse-submodules https://github.com/open-tinker/OpenTinker.git
 cd OpenTinker
 ```
 
