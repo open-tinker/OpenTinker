@@ -27,7 +27,7 @@ output_path: null          # Output results file (jsonl)
 max_samples: null          # Limit samples (null = all)
 
 # Environment settings  
-env_endpoint: http://0.0.0.0:8088
+env_url: http://0.0.0.0:8088
 
 # Multi-turn settings (same as training config)
 multi_turn:

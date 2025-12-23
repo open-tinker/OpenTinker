@@ -29,7 +29,7 @@ output_path: null          # Output results file (jsonl)
 max_samples: 10            # Number of games to play
 
 # Environment settings  
-env_endpoint: http://0.0.0.0:8091
+env_url: http://0.0.0.0:8091
 
 # Multi-turn settings (Gomoku is multi-turn game)
 multi_turn:

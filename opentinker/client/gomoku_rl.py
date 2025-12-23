@@ -81,10 +81,11 @@ def main(args):
         "max_total_steps": interaction_config.get("max_total_steps", 40),
     }
     
-    env_endpoint = interaction_config.env_endpoint
+    # Use top-level env_url (with fallback to interaction.config.env_endpoint)
+    env_url = args.get("env_url") or interaction_config.get("env_endpoint")
     
     print("\nSetting up GameEnvironment with GomokuGame...")
-    print(f"  Environment endpoint: {env_endpoint}")
+    print(f"  Environment URL: {env_url}")
     print(f"  Board size: {game_kwargs['board_size']}")
     print(f"  Job ID for stats: {job_id}")
     
@@ -99,12 +100,12 @@ def main(args):
     print(f"  Interaction config path: {env.get_interaction_config_path()}")
     
     # 3. Setup GameStatsClient for per-step metrics (use env.job_id for consistency)
-    game_stats = GameStatsClient(env_endpoint, job_id=env.job_id)
+    game_stats = GameStatsClient(env_url, job_id=env.job_id)
     if game_stats.health_check():
-        print(f"✓ Connected to game server for metrics at {env_endpoint}")
+        print(f"✓ Connected to game server for metrics at {env_url}")
         game_stats.reset_all()  # Reset all stats before training
     else:
-        print(f"⚠ Game server at {env_endpoint} not responding - metrics disabled")
+        print(f"⚠ Game server at {env_url} not responding - metrics disabled")
         game_stats = None
     
     # 4. Connect to allocated server

@@ -5,9 +5,10 @@
 # - No reward function (environment provides rewards)
 # - Interaction configuration for Gym environment
 
-server_url: "http://localhost:8000" # 如果是scheduler版本，不需要这个参数
+# Server settings
 scheduler_url: "http://localhost:8766"
 scheduler_api_key: "otk_98b8db24ccd64c92e1fdd9a232e209fa"
+env_url: "http://localhost:8084"  # Environment server URL
 
 # GPU allocation
 num_gpus: 4

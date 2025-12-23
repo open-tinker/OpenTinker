@@ -53,9 +53,7 @@ interaction:
   name: gomoku
   class_path: opentinker.environment.gym_environment_interaction.GymEnvironmentInteraction
   config:
-    env_host: 0.0.0.0
-    env_port: 8088
-    env_endpoint: http://${interaction.config.env_host}:${interaction.config.env_port}
+    env_endpoint: ${env_url}  # References top-level env_url
     max_steps: 81 # 这是后端GymEnvironmentInteraction的参数
     max_total_steps: 39  # 调用环境的step方法的最大次数限制（防止invalid move hacking）
     max_initial_moves: 0
@@ -73,10 +71,11 @@ multi_turn:
     experiment_name: "gomoku_interaction"  # Experiment name in Weave
 
 
-# Scheduler settings
+# Server settings
 scheduler_url: "http://0.0.0.0:8780"
 scheduler_api_key: otk_98b8db24ccd64c92e1fdd9a232e209fa # this is user id
+env_url: "http://0.0.0.0:8088"  # Game environment server URL
 
 # GPU settings
-num_gpus: 4
+num_gpus: 2
 

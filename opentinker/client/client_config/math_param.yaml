@@ -57,9 +57,7 @@ interaction:
   name: math
   class_path: opentinker.environment.gym_environment_interaction.GymEnvironmentInteraction
   config:
-    env_host: 0.0.0.0
-    env_port: 8088
-    env_endpoint: http://${interaction.config.env_host}:${interaction.config.env_port}
+    env_endpoint: ${env_url}  # References top-level env_url
     max_steps: 1     # Max interaction steps
 
 multi_turn:
@@ -69,9 +67,10 @@ multi_turn:
     weave_project: null
     experiment_name: "math_interaction"
 
-# Scheduler settings
+# Server settings
 scheduler_url: "http://0.0.0.0:8780"
 scheduler_api_key: otk_98b8db24ccd64c92e1fdd9a232e209fa
+env_url: "http://0.0.0.0:8088"  # Math environment server URL
 
 # GPU settings
 num_gpus: 4

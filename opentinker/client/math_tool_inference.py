@@ -49,12 +49,12 @@ def main(args):
     print(f"✓ Inference job {job_id} started at {vllm_server_url}")
     
     # 2. Setup GameStatsClient for per-step metrics (with job_id isolation)
-    game_stats = GameStatsClient(args.env_endpoint, job_id=job_id)
+    game_stats = GameStatsClient(args.env_url, job_id=job_id)
     if game_stats.health_check():
-        print(f"✓ Connected to code interpreter game server at {args.env_endpoint}")
+        print(f"✓ Connected to code interpreter game server at {args.env_url}")
         game_stats.reset_all()  # Reset stats for this job before inference
     else:
-        print(f"⚠ Game server not available at {args.env_endpoint}, continuing without stats")
+        print(f"⚠ Game server not available at {args.env_url}, continuing without stats")
         print(f"  Make sure to start: python opentinker/environment/math/code_interpreter_math_server.py --port 8088")
         game_stats = None
     
@@ -69,7 +69,7 @@ def main(args):
         tokenizer_path=args.get("tokenizer_path") or args.model_path,
         data_path=args.data_path,
         game_class=CodeInterpreterMathGame,
-        env_endpoint=args.env_endpoint,
+        env_endpoint=args.env_url,
         job_id=job_id,  # Pass job_id for stats isolation
         output_path=args.get("output_path"),
         temperature=args.temperature,
