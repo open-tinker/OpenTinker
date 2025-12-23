@@ -30,7 +30,7 @@ interaction:
     name: "gym_env"  # Name referenced in dataset's interaction_kwargs
     class_path: opentinker.environment.gym_environment_interaction.GymEnvironmentInteraction
     config:
-        env_endpoint: "http://localhost:8084"  # Mock environment server
+        env_endpoint: ${env_url}  # References top-level env_url
         max_steps: 50
         observation_template: "Environment: {observation}"
 
