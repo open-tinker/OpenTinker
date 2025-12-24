@@ -46,7 +46,8 @@ def main(args):
     
     # 2. Setup environment
     print("\n[2/4] Setting up environment...")
-    env_endpoint = args.interaction.config.env_endpoint
+    # Use top-level env_url (with fallback to interaction.config.env_endpoint)
+    env_url = args.get("env_url") or args.interaction.config.get("env_endpoint")
     env = MathCodeInterpreterEnvironment(
         game_class=CodeInterpreterMathGame,
         config=args,
@@ -56,18 +57,18 @@ def main(args):
     )
     print(f"✓ Environment created")
     print(f"  - Interaction config: {env.get_interaction_config_path()}")
-    print(f"  - Game server endpoint: {env_endpoint}")
+    print(f"  - Game server endpoint: {env_url}")
     
     # 3. Setup game stats client
     print("\n[3/4] Connecting to game server...")
-    game_stats = GameStatsClient(env_endpoint, job_id=env.job_id)
+    game_stats = GameStatsClient(env_url, job_id=env.job_id)
     if game_stats.health_check():
         game_stats.reset_all()
-        print(f"✓ Connected to game server at {env_endpoint}")
+        print(f"✓ Connected to game server at {env_url}")
     else:
         game_stats = None
-        print(f"⚠ Game server not responding at {env_endpoint}")
-        print(f"  Make sure to start: python opentinker/environment/math/code_interpreter_math_server.py --port {args.interaction.config.env_port}")
+        print(f"⚠ Game server not responding at {env_url}")
+        print(f"  Make sure to start: python opentinker/environment/math/code_interpreter_math_server.py")
     
     # 4. Connect to training server and train
     print("\n[4/4] Starting training...")

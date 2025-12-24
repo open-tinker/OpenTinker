@@ -62,14 +62,13 @@ interaction:
   name: math_code_interpreter
   class_path: opentinker.environment.gym_environment_interaction.GymEnvironmentInteraction
   config:
-    env_host: 0.0.0.0
-    env_port: 8088
-    env_endpoint: http://${interaction.config.env_host}:${interaction.config.env_port}
+    env_endpoint: ${env_url}  # References top-level env_url
     max_steps: 5    # Max interaction steps (code executions)
 
-# Scheduler settings
+# Server settings
 scheduler_url: "http://0.0.0.0:8780"
 scheduler_api_key: null
+env_url: "http://0.0.0.0:8088"  # Code interpreter server URL
 
 # GPU settings
 num_gpus: 4

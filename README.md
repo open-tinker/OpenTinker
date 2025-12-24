@@ -151,10 +151,9 @@ python opentinker/client/math_rl.py \
     data_path=data/math_agentloop/train.parquet \
     val_data_path=data/math_agentloop/test.parquet \
     scheduler_url=http://<server_endpoint>:<scheduler_port> \
-    interaction.config.env_port=<env_port> \
-    interaction.config.env_host=<client_endpoint>
+    env_url=http://<client_endpoint>:<env_port>
 
-# multi turn tool ca
+# multi turn tool call
 python opentinker/client/math_tool_rl.py \
     tokenizer_path=Qwen/Qwen2.5-1.5B \
     batch_size=16 \
@@ -163,8 +162,7 @@ python opentinker/client/math_tool_rl.py \
     save_freq=1000 \
     test_freq=5 \
     scheduler_url=http://<server_endpoint>:<scheduler_port> \
-    interaction.config.env_port=<env_port> \
-    interaction.config.env_host=<client_endpoint>
+    env_url=http://<client_endpoint>:<env_port>
 ```
 
 **Gomoku RL (Multi-turn):**
@@ -177,8 +175,7 @@ python opentinker/client/gomoku_rl.py \
     save_freq=1000 \
     test_freq=5 \
     scheduler_url=http://<server_endpoint>:<scheduler_port> \
-    interaction.config.env_port=<env_port> \
-    interaction.config.env_host=<client_endpoint>
+    env_url=http://<client_endpoint>:<env_port>
 ```
 
 **Math Inference:**
@@ -189,8 +186,8 @@ python opentinker/client/math_inference.py \
     data_path=data/math/test.parquet \
     output_path=./tmp/results.jsonl \
     max_samples=5 \
-    env_endpoint=http://<client_endpoint>:<env_port> \
-    scheduler_url=http://<server_endpoint>:<scheduler_port>
+    scheduler_url=http://<server_endpoint>:<scheduler_port> \
+    env_url=http://<client_endpoint>:<env_port>
 
 # multi turn tool call
 python opentinker/client/math_tool_inference.py \
@@ -198,8 +195,8 @@ python opentinker/client/math_tool_inference.py \
     data_path=data/math/test.parquet \
     output_path=./tmp/results.jsonl \
     max_samples=5 \
-    env_endpoint=http://<client_endpoint>:<env_port> \
-    scheduler_url=http://<server_endpoint>:<scheduler_port>
+    scheduler_url=http://<server_endpoint>:<scheduler_port> \
+    env_url=http://<client_endpoint>:<env_port>
 ```
 
 **Gomoku Inference:**
@@ -208,8 +205,8 @@ python opentinker/client/gomoku_inference.py \
     model_path=<model_name> \
     output_path=./tmp/results.jsonl \
     max_samples=5 \
-    env_endpoint=http://<client_endpoint>:<env_port> \
-    scheduler_url=http://<server_endpoint>:<scheduler_port>
+    scheduler_url=http://<server_endpoint>:<scheduler_port> \
+    env_url=http://<client_endpoint>:<env_port>
 ```
 
 

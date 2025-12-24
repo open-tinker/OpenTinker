@@ -46,7 +46,8 @@ def main(args):
     print(f"✓ Job {job_id} allocated at {server_url}")
     
     # 2. Setup environment (job_id is automatically handled)
-    env_endpoint = args.interaction.config.env_endpoint
+    # Use top-level env_url (with fallback to interaction.config.env_endpoint)
+    env_url = args.get("env_url") or args.interaction.config.get("env_endpoint")
     env = MathGameEnvironment(
         game_class=MathGame,
         config=args,
@@ -57,13 +58,13 @@ def main(args):
     print(f"✓ Environment created, interaction config: {env.get_interaction_config_path()}")
     
     # 3. Setup game stats client (use env.job_id for consistency)
-    game_stats = GameStatsClient(env_endpoint, job_id=env.job_id)
+    game_stats = GameStatsClient(env_url, job_id=env.job_id)
     if game_stats.health_check():
         game_stats.reset_all()
-        print(f"✓ Connected to math server at {env_endpoint}")
+        print(f"✓ Connected to math server at {env_url}")
     else:
         game_stats = None
-        print(f"⚠ Math server not responding at {env_endpoint}")
+        print(f"⚠ Math server not responding at {env_url}")
     
     # 4. Connect to training server
     client = ServiceClient(

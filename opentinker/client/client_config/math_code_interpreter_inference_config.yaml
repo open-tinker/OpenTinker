@@ -29,7 +29,7 @@ output_path: null          # Output results file (jsonl)
 max_samples: null          # Limit samples (null = all)
 
 # Environment settings (code interpreter math server)
-env_endpoint: http://0.0.0.0:8088
+env_url: http://0.0.0.0:8088
 
 # Multi-turn settings (allow code execution iterations)
 multi_turn:
