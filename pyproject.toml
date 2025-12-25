@@ -1,0 +1,66 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "opentinker"
+version = "0.1.0"
+description = "OpenTinker: Democratizing Agentic Reinforcement Learning as a Service"
+readme = "README.md"
+license = {text = "Apache-2.0"}
+authors = [
+    {name = "Siqi Zhu", email = "siqizhu4@illinois.edu"},
+    {name = "Jiaxuan You", email = "jiaxuan@illinois.edu"},
+]
+requires-python = ">=3.8"
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: Apache Software License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+dependencies = [
+    # Core dependencies
+    "ray>=2.9.0",
+    "torch>=2.0.0",
+    "transformers>=4.35.0",
+    # Web framework
+    "fastapi>=0.104.0",
+    "uvicorn>=0.24.0",
+    "pydantic>=2.0.0",
+    # Configuration
+    "omegaconf>=2.3.0",
+    "hydra-core>=1.3.0",
+    "pyyaml>=6.0",
+    # Data processing
+    "pandas>=2.0.0",
+    "pyarrow>=14.0.0",
+    "datasets>=2.14.0",
+    # Utilities
+    "requests>=2.31.0",
+    "aiohttp>=3.9.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.4.0",
+    "black>=23.0.0",
+    "flake8>=6.1.0",
+]
+logging = [
+    "wandb>=0.16.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/open-tinker/OpenTinker"
+Repository = "https://github.com/open-tinker/OpenTinker"
+
+[tool.setuptools.packages.find]
+include = ["opentinker", "opentinker.*"]
