@@ -22,7 +22,7 @@ Choose an example below to get started. Each example includes step-by-step instr
 | ------------------------------------------------ | ------------------------------------------------------------------------------------ | --------------------------------------------------------------------------------- |
 | **[LLM Single-Turn Math](docs/math_singleturn.md)**                       | Mathematical problem solving                                     | [wandb](https://wandb.ai/zsqzz/Open-Tinker/runs/bwkq1wl8?nw=nwuserzhusq20)                                                                               |
 | **[LLM Multi-Turn Math](docs/math_multiturn.md)** | Multi-turn mathematical problem solving with tool calling                          | [wandb](https://wandb.ai/zsqzz/Open-Tinker/runs/f5pt6gcw?nw=nwuserzhusq20)                       |
-| **[LLM Single-LoRA Single-Turn Math](docs/lora_singleturn.md)**                  | Math single-turn Trained With LoRA                                                         | [wandb](https://wandb.ai/zsqzz/Open-Tinker/runs/cl1w5l07?nw=nwuserzhusq20)                        |
+| **[LLM Single-LoRA Single-Turn Math](docs/math_lora_singleturn.md)**                  | Math single-turn Trained With LoRA                                                         | [wandb](https://wandb.ai/zsqzz/Open-Tinker/runs/cl1w5l07?nw=nwuserzhusq20)                        |
 | **[VLM Single-Turn Math](docs/vlm_geo3k_singleturn.md)**                    | geometry 3k math problem solving                                                          | [wandb](https://wandb.ai/zsqzz/Open-Tinker/runs/aidfc2y1?nw=nwuserzhusq20)                                                                               |
 | **[VLM Multi-Turn Math](docs/vlm_geo3k_multiturn.md)**             | geometry 3k math problem solving with tool calling                                           | [wandb](https://wandb.ai/zsqzz/Open-Tinker/runs/r39htm2o?nw=nwuserzhusq20)                |
 | **[LLM Game Agent](docs/gomoku_multiturn.md)**       | A multi-turn gomoku agent | [wandb](https://wandb.ai/zsqzz/Open-Tinker/runs/7a7ggkw3?nw=nwuserzhusq20)                        |
@@ -126,30 +126,19 @@ For advanced usage (REST API registration, using the key) and detailed configura
 
 ## 🎮 Environments
 
-### Math Environment (Data-driven)
+OpenTinker provides a flexible environment design framework that supports diverse training scenarios. Our architecture accommodates two orthogonal dimensions:
 
-Single-turn math reasoning environment where the model solves mathematical problems. It serves as a key example of a **data-driven environment**, loading data from parquet files.
+- **Data Source**: *Data-Dependent* environments load structured datasets (e.g., parquet files) to provide prompts, while *Data-Free* environments generate prompts dynamically from simulators or game engines.
+- **Interaction Mode**: *Single-Turn* environments involve one-shot model responses, while *Multi-Turn* environments enable iterative interactions with tool calls and feedback loops.
 
-We also support **multi-turn tool call** mode (Code Interpreter), where the model can iteratively generate and execute Python code to solve math problems. This enables more complex reasoning through code execution feedback.
+This 2×2 design space enables four distinct paradigms, each suited to different learning objectives:
 
-| Component | Description |
-|-----------|-------------|
-| Server (Single-turn) | `opentinker/environment/math/math_server.py` |
-| Server (Multi-turn Tool Call) | `opentinker/environment/math/code_interpreter_math_server.py` |
-| Client (Single-turn) | `opentinker/client/math_client_unified.py` |
-| Client (Multi-turn Tool Call) | `opentinker/client/math_code_interpreter_client.py` |
-| Data | Parquet files with math problems |
-| Reward | Correctness of mathematical solutions |
-
-### Gomoku Environment (Data-free)
-
-Multi-turn game environment where the model plays Gomoku against an opponent. It serves as a key example of a **data-free environment**, where the model gets prompts directly from the simulated environment.
-
-| Component | Description |
-|-----------|-------------|
-| Server | `opentinker/environment/gomoku/gomoku_server.py` |
-| Data | Generated from simulated games |
-| Reward | Win/loss/draw outcomes |
+| Paradigm | Data Source | Interaction | Example Use Case |
+|----------|-------------|-------------|------------------|
+| **Data-Dependent × Single-Turn** | Dataset | One-shot | Math reasoning, QA tasks |
+| **Data-Dependent × Multi-Turn** | Dataset | Iterative | Tool-assisted problem solving |
+| **Data-Free × Single-Turn** | Simulator | One-shot | Bandit |
+| **Data-Free × Multi-Turn** | Simulator | Iterative | Complex game playing, dialogue agents |
 
 
 ## 📚 Documentation
