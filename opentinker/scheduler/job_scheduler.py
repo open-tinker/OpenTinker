@@ -968,9 +968,10 @@ class JobSchedulerActor:
         
         logger.info(f"Job {job.job_id}: Launching server with command: {' '.join(cmd)}")
         
-        # Create log files for stdout and stderr
-        stdout_log = self.logs_dir / f"job_{job.job_id}_{time.time()}_stdout.log"
-        stderr_log = self.logs_dir / f"job_{job.job_id}_{time.time()}_stderr.log"
+        # Create log files for stdout and stderr with human-readable timestamp
+        timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+        stdout_log = self.logs_dir / f"{timestamp}_job_{job.job_id}_stdout.log"
+        stderr_log = self.logs_dir / f"{timestamp}_job_{job.job_id}_stderr.log"
         
         logger.info(f"Job {job.job_id}: Logging stdout to {stdout_log}")
         logger.info(f"Job {job.job_id}: Logging stderr to {stderr_log}")
@@ -1646,9 +1647,10 @@ class JobSchedulerActor:
         
         logger.info(f"Inference Job {job.job_id}: Launching vLLM server with command: {' '.join(cmd)}")
         
-        # Create log files
-        stdout_log = self.logs_dir / f"inference_job_{job.job_id}_{time.time()}_stdout.log"
-        stderr_log = self.logs_dir / f"inference_job_{job.job_id}_{time.time()}_stderr.log"
+        # Create log files with human-readable timestamp
+        timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+        stdout_log = self.logs_dir / f"{timestamp}_inference_job_{job.job_id}_stdout.log"
+        stderr_log = self.logs_dir / f"{timestamp}_inference_job_{job.job_id}_stderr.log"
         
         logger.info(f"Inference Job {job.job_id}: Logging stdout to {stdout_log}")
         logger.info(f"Inference Job {job.job_id}: Logging stderr to {stderr_log}")

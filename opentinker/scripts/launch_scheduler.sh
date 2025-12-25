@@ -2,7 +2,8 @@
 # Convenience script to launch the job scheduler
 
 export VLLM_USE_FLASHINFER_SAMPLER=0
-#export VLLM_DISABLE_FLASHINFER_PREFILL=1
+export VLLM_DISABLE_FLASHINFER_PREFILL=1
+export VLLM_DISABLE_SLEEP_MODE=1
 
 #export CUDA_HOME="/home/yixingc/.conda/envs/mae/cuda-13.0"
 #export PATH="$CUDA_HOME/bin:$PATH"

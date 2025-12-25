@@ -12,6 +12,7 @@ Example:
     result = game.step("go to desk 1")
 """
 
+import os
 import random
 import re
 from typing import Any, Dict, List, Optional, Tuple
@@ -58,12 +59,18 @@ class ALFWorldGame(AbstractGame):
         "pick_two_obj_and_place",
     ]
     
+    # Class-level cache for shared ALFWorld environments
+    # Key: (config_path, split) -> initialized environment
+    _shared_envs: dict = {}
+    _shared_configs: dict = {}
+    
     def __init__(
         self,
         config_path: Optional[str] = None,
         max_steps: int = DEFAULT_MAX_STEPS,
         task_types: Optional[List[str]] = None,
         split: str = "train",
+        num_games: int = -1,
     ):
         """Initialize ALFWorld game.
         
@@ -72,6 +79,7 @@ class ALFWorldGame(AbstractGame):
             max_steps: Maximum steps per episode
             task_types: Task types to sample from (None = all types)
             split: Dataset split ("train", "eval_in_distribution", "eval_out_of_distribution")
+            num_games: Number of games to load (-1 = all games, e.g. 64 for faster loading)
         """
         if not ALFWORLD_AVAILABLE:
             raise ImportError(
@@ -83,12 +91,12 @@ class ALFWorldGame(AbstractGame):
         self.max_steps = max_steps
         self.task_types = task_types or self.ALL_TASK_TYPES
         self.split = split
+        self.num_games = num_games
         
         # Load ALFWorld config
         self._load_alfworld_config()
         
-        # Game state
-        self._env = None
+        # Game state (instance-specific)
         self._current_obs = None
         self._current_info = None
         self._step_count = 0
@@ -98,30 +106,71 @@ class ALFWorldGame(AbstractGame):
     
     def _load_alfworld_config(self):
         """Load ALFWorld configuration."""
+        import alfworld
+        
         if self.config_path:
             with open(self.config_path, 'r') as f:
                 self._config = yaml.safe_load(f)
         else:
-            # Use default config
+            # ALFWorld data directory (need to run 'alfworld-download' first)
+            alfworld_data = os.path.expandvars(os.environ.get('ALFWORLD_DATA', '$HOME/.cache/alfworld'))
+            
+            # Use default config with all required fields
             self._config = {
+                'general': {
+                    'training_method': 'dqn',  # or 'dagger'
+                },
                 'env': {
                     'type': 'AlfredTWEnv',
                     'regen_game_files': False,
                     'domain_randomization': False,
+                    'goal_desc_human_anns_prob': 0,  # Required by AlfredTWEnv
+                    'task_types': [1, 2, 3, 4, 5, 6],  # All 6 task types
+                    'expert_type': 'handcoded',  # or 'planner'
                     'registration': {
                         'batch_size': 1,
                     },
                     'split': self.split,
-                }
+                },
+                'dataset': {
+                    'data_path': f'{alfworld_data}/json_2.1.1/train',
+                    'eval_id_data_path': f'{alfworld_data}/json_2.1.1/valid_seen',
+                    'eval_ood_data_path': f'{alfworld_data}/json_2.1.1/valid_unseen',
+                    'num_train_games': self.num_games,  # -1 means use all games
+                    'num_eval_games': self.num_games,
+                },
+                'logic': {
+                    'domain': f'{alfworld_data}/logic/alfred.pddl',
+                    'grammar': f'{alfworld_data}/logic/alfred.twl2',
+                },
+                'rl': {
+                    'training': {
+                        'max_nb_steps_per_episode': self.max_steps,
+                    },
+                },
             }
     
     def _init_env(self):
-        """Initialize ALFWorld environment."""
-        if self._env is None:
-            # Create the text world environment
+        """Initialize ALFWorld environment (shared across instances).
+        
+        Uses class-level cache to avoid re-loading games for each instance.
+        """
+        cache_key = (self.config_path, self.split, self.num_games)
+        
+        if cache_key not in ALFWorldGame._shared_envs:
+            print(f"[ALFWorldGame] Initializing shared environment for split='{self.split}'...")
+            # Create the text world environment using new API
             env_type = self._config['env']['type']
-            self._env = getattr(alfworld_env, env_type)(self._config)
-            self._env = self._env.init_env(batch_size=1)
+            # New ALFWorld API uses get_environment() to get the class
+            env_class = alfworld_env.get_environment(env_type)
+            env = env_class(self._config)
+            env = env.init_env(batch_size=1)
+            ALFWorldGame._shared_envs[cache_key] = env
+            ALFWorldGame._shared_configs[cache_key] = self._config
+            print(f"[ALFWorldGame] Shared environment initialized and cached.")
+        
+        # Use the shared environment
+        self._env = ALFWorldGame._shared_envs[cache_key]
     
     def reset(self, task_type: Optional[str] = None, seed: Optional[int] = None, **kwargs) -> str:
         """Reset the game to a new episode.
@@ -145,7 +194,11 @@ class ALFWorldGame(AbstractGame):
         obs, info = self._env.reset()
         
         # Extract observation and task
-        self._current_obs = obs[0] if isinstance(obs, list) else obs
+        # Handle obs being list, tuple, or string
+        if isinstance(obs, (list, tuple)):
+            self._current_obs = obs[0]
+        else:
+            self._current_obs = obs
         self._current_info = info
         
         # Parse task description from observation
@@ -206,10 +259,10 @@ class ALFWorldGame(AbstractGame):
         # Execute action in environment
         obs, reward, done, info = self._env.step([parsed_action])
         
-        # Extract from batch
-        obs = obs[0] if isinstance(obs, list) else obs
-        reward = reward[0] if isinstance(reward, list) else reward
-        done = done[0] if isinstance(done, list) else done
+        # Extract from batch (handle list or tuple)
+        obs = obs[0] if isinstance(obs, (list, tuple)) else obs
+        reward = reward[0] if isinstance(reward, (list, tuple)) else reward
+        done = done[0] if isinstance(done, (list, tuple)) else done
         
         # Update state
         self._current_obs = obs
@@ -243,7 +296,8 @@ class ALFWorldGame(AbstractGame):
             reward=final_reward,
             done=done,
             info={
-                "step": self._step_count,
+                # Note: Don't include "step" here as gym_environment_interaction.py 
+                # already passes it explicitly to observation_template.format()
                 "raw_reward": float(reward),
                 "action_taken": parsed_action,
                 "task": self._task_desc,

@@ -25,11 +25,14 @@ def main():
     parser.add_argument("--split", type=str, default="train",
                         choices=["train", "eval_in_distribution", "eval_out_of_distribution"],
                         help="Dataset split to use")
+    parser.add_argument("--num_games", type=int, default=5,
+                        help="Number of games to load (-1 = all games, e.g. 64 for faster loading)")
     args = parser.parse_args()
     
     print(f"\nALFWorld Game Configuration:")
     print(f"  Max steps: {args.max_steps}")
     print(f"  Split: {args.split}")
+    print(f"  Num games: {args.num_games if args.num_games > 0 else 'all'}")
     print(f"  Config: {args.config_path or 'default'}")
     print(f"\nReward structure:")
     print(f"  Success: +{ALFWorldGame.REWARD_SUCCESS}")
@@ -44,6 +47,7 @@ def main():
         config_path=args.config_path,
         max_steps=args.max_steps,
         split=args.split,
+        num_games=args.num_games,
     )
 
 

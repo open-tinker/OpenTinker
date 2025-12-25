@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
 """ALFWorld RL Training Client.
 
+This script trains an LLM agent to complete household tasks in ALFWorld.
+
 Usage:
-    python alfworld_rl.py
+    # Start ALFWorld server first (in another terminal):
+    python -m opentinker.environment.alfworld.alfworld_server --port 8082
 
-Make sure to:
-1. Start the ALFWorld server: python -m opentinker.environment.alfworld.alfworld_server --port 8082
-2. Start the scheduler: bash scripts/launch_scheduler.sh
+    # Run training:
+    python alfworld_rl.py scheduler_url=http://localhost:8780 num_gpus=2
 """
-
 import torch
 from transformers import AutoTokenizer
 from omegaconf import OmegaConf
@@ -88,6 +89,7 @@ def main(args):
     interaction_config = args.interaction.config
     game_kwargs = {
         "max_steps": interaction_config.get("max_total_steps", 50),
+        "split": interaction_config.get("split", "train"),
     }
     
     env_endpoint = interaction_config.env_endpoint
@@ -95,13 +97,14 @@ def main(args):
     print("\nSetting up GameEnvironment with ALFWorldGame...")
     print(f"  Environment endpoint: {env_endpoint}")
     print(f"  Max steps: {game_kwargs['max_steps']}")
+    print(f"  Split: {game_kwargs['split']}")
     print(f"  Job ID for stats: {job_id}")
     
     env = GameEnvironment(
         game_class=ALFWorldGame,
         config=args,
         game_kwargs=game_kwargs,
-        job_id=job_id,
+        job_id=job_id,  # Pass job_id directly
     )
     
     print(f"✓ Environment created")
@@ -111,7 +114,7 @@ def main(args):
     game_stats = GameStatsClient(env_endpoint, job_id=env.job_id)
     if game_stats.health_check():
         print(f"✓ Connected to ALFWorld server for metrics at {env_endpoint}")
-        game_stats.reset_all()
+        game_stats.reset_all()  # Reset all stats before training
     else:
         print(f"⚠ ALFWorld server at {env_endpoint} not responding - metrics disabled")
         game_stats = None
@@ -163,11 +166,13 @@ def main(args):
         # Display final cumulative game stats
         if game_stats:
             print("\n" + "-" * 40)
-            print("Final ALFWorld Statistics:")
+            print("Final Game Statistics:")
             cumulative = game_stats.get_all_stats()
             if cumulative:
                 print(f"  Total episodes: {cumulative.get('total_games', 0):.0f}")
-                print(f"  Success rate: {cumulative.get('mean_final_reward', 0) / ALFWorldGame.REWARD_SUCCESS:.1%}")
+                print(f"  Success rate: {cumulative.get('cumulative_win_rate', 0):.1%}")
+                print(f"  Total successes: {cumulative.get('total_wins', 0):.0f}")
+                print(f"  Total failures: {cumulative.get('total_losses', 0):.0f}")
         print("=" * 60)
         
     finally:
@@ -177,4 +182,3 @@ def main(args):
 
 if __name__ == "__main__":
     main()
-
