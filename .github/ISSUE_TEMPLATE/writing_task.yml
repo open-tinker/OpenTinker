@@ -1,0 +1,24 @@
+name: 🖊️Writing Task
+description: Describe writing task here
+title: "[WRT]: "
+labels: ["writing"]
+assignees: [""]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Please make sure this writing task request hasn't been already submitted by someone by looking through other open/closed issues
+
+  - type: textarea
+    id: description
+    attributes:
+      label: Description
+      description: Give us a brief description of the writing task you would like
+    validations:
+      required: true
+
+  - type: textarea
+    id: additional-information
+    attributes:
+      label: Additional Information
+      description: Give us some additional information on the writing task like exptected length, main content, etc.
