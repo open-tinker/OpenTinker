@@ -28,9 +28,6 @@ custom_chat_template: null
 external_lib: null
 
 # override hf config
-# Use "sdpa" instead of "flash_attention_2" to avoid flash_attn ABI mismatch
-override_config:
-  attn_implementation: "sdpa"
 
 # whether to enable gradient checkpointing. Only valid when we use hf model definition
 enable_gradient_checkpointing: True

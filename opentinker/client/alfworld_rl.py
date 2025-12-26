@@ -10,8 +10,6 @@ Usage:
     # Run training:
     python alfworld_rl.py scheduler_url=http://localhost:8780 num_gpus=2
 """
-import torch
-from transformers import AutoTokenizer
 from omegaconf import OmegaConf
 import hydra
 

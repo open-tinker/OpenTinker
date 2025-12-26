@@ -15,7 +15,7 @@ Example:
 import os
 import random
 import re
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
 import logging
 
 from opentinker.environment.base_game import AbstractGame, StepResult
