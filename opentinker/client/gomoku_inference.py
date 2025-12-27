@@ -66,7 +66,7 @@ def main(args):
 
     print(f"Running inference with max_samples={args.get('max_samples', 10)}...")
 
-    results = run_inference(
+    run_inference(
         model_path=None,  # Not needed when using vllm_server_url
         vllm_server_url=vllm_server_url,
         tokenizer_path=args.get("tokenizer_path") or args.model_path,

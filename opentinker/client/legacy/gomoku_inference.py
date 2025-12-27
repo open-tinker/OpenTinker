@@ -37,7 +37,7 @@ def main(args):
     max_user_turns = args.multi_turn.get("max_user_turns", 50)
     max_assistant_turns = args.multi_turn.get("max_assistant_turns", 50)
 
-    results = run_inference(
+    run_inference(
         model_path=args.get("model_path"),
         vllm_server_url=args.get("vllm_server_url"),
         tokenizer_path=args.get("tokenizer_path"),

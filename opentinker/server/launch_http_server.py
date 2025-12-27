@@ -138,9 +138,34 @@ def main(cfg):
         logger.info("Agent Loop Mode Enabled")
         logger.info("=" * 60)
 
-        # Set VLLM_USE_V1 for async mode
+        # vLLM engine toggles (env-driven).
+        #
+        # IMPORTANT: Do NOT blindly override user's env vars here.
+        # In some environments vLLM V1 + sleep_mode can be unstable (e.g. cumem_allocator.cpp:66).
+        # - If user sets VLLM_USE_V1, respect it; otherwise default to 1 for async rollout.
+        # - If user sets VLLM_DISABLE_SLEEP_MODE, respect it; otherwise default-disable sleep mode
+        #   to avoid wake_up-related crashes.
+        # NOTE: In vLLM==0.11.0 the async engine used here is the V1 engine.
+        # If VLLM_USE_V1=0, vLLM will crash with:
+        #   "Using V1 AsyncLLMEngine, but envs.VLLM_USE_V1=False"
+        # So we force it to 1 for agent-loop async rollout.
+        if os.environ.get("VLLM_USE_V1") not in (None, "1", 1):
+            logger.warning(
+                f"Overriding VLLM_USE_V1={os.environ.get('VLLM_USE_V1')} -> 1 "
+                "(agent-loop async rollout requires vLLM V1 in vLLM==0.11.0)."
+            )
         os.environ["VLLM_USE_V1"] = "1"
         logger.info("Set VLLM_USE_V1=1 for async rollout")
+
+        if "VLLM_DISABLE_SLEEP_MODE" not in os.environ:
+            os.environ["VLLM_DISABLE_SLEEP_MODE"] = "1"
+            logger.info(
+                "Set VLLM_DISABLE_SLEEP_MODE=1 (default) to avoid wake_up allocator crashes"
+            )
+        else:
+            logger.info(
+                f"Respecting existing VLLM_DISABLE_SLEEP_MODE={os.environ.get('VLLM_DISABLE_SLEEP_MODE')}"
+            )
 
         # Increase Ray's memory threshold to avoid premature OOM kills
         # Default is 0.95 (95%), we increase to 0.98 (98%)
@@ -168,7 +193,17 @@ def main(cfg):
             ):
                 cfg.actor_rollout_ref.rollout.multi_turn.max_user_turns = 10
             cfg.actor_rollout_ref.rollout.multi_turn.format = "hermes"
-            cfg.actor_rollout_ref.rollout.multi_turn.max_parallel_calls = 1
+            # IMPORTANT: Do not force serialization. If max_parallel_calls is 1,
+            # env/tool calls will look "serial" even if the env server has many shards.
+            # Default to rollout.n (or 8) if not specified so shards can be utilized.
+            if (
+                cfg.actor_rollout_ref.rollout.multi_turn.get("max_parallel_calls", None)
+                is None
+            ):
+                default_parallel = cfg.actor_rollout_ref.rollout.get("n", None) or 8
+                cfg.actor_rollout_ref.rollout.multi_turn.max_parallel_calls = int(
+                    default_parallel
+                )
             cfg.actor_rollout_ref.rollout.multi_turn.max_tool_response_length = 2000
             cfg.actor_rollout_ref.rollout.multi_turn.tool_response_truncate_side = (
                 "right"

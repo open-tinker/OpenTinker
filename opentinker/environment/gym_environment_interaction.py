@@ -24,6 +24,8 @@ The environment can be either local (imported directly) or remote (via HTTP API)
 
 import logging
 import os
+import zlib
+from urllib.parse import urlparse, urlunparse
 from typing import Any, Optional, Callable
 from uuid import uuid4
 
@@ -62,7 +64,69 @@ class GymEnvironmentInteraction(BaseInteraction):
 
     def __init__(self, config: dict):
         super().__init__(config)
+        # Remote environment endpoint(s).
+        #
+        # - env_endpoint: single URL string (backward compatible)
+        # - env_endpoints: list of URL strings (recommended for sharded servers)
+        # - env_shards: if set (>1) and env_endpoint has a port, we derive env_endpoints
         self.env_endpoint: Optional[str] = config.get("env_endpoint")
+        self.env_endpoints: Optional[list[str]] = config.get("env_endpoints")
+        self.env_shards: int = int(config.get("env_shards", 1) or 1)
+        if self.env_endpoints is not None and isinstance(self.env_endpoints, str):
+            # Allow comma-separated string for convenience.
+            self.env_endpoints = [
+                s.strip() for s in self.env_endpoints.split(",") if s.strip()
+            ]
+
+        # Normalize endpoint host. "0.0.0.0" is a bind-all address and is not a
+        # reliable destination address for clients (can be flaky / invalid).
+        # If the user configured env_host=0.0.0.0, rewrite to 127.0.0.1 for local access.
+        def _normalize(url: str) -> str:
+            if "//0.0.0.0" not in url:
+                return url
+            try:
+                parsed = urlparse(url)
+                if parsed.hostname == "0.0.0.0":
+                    netloc = f"127.0.0.1:{parsed.port}" if parsed.port else "127.0.0.1"
+                    parsed = parsed._replace(netloc=netloc)
+                    return urlunparse(parsed)
+            except Exception:
+                return url
+            return url
+
+        if self.env_endpoints:
+            self.env_endpoints = [_normalize(u) for u in self.env_endpoints]
+        if self.env_endpoint:
+            normalized = _normalize(self.env_endpoint)
+            if normalized != self.env_endpoint:
+                logger.warning(
+                    f"[GymEnvironmentInteraction] Rewrote env_endpoint to {normalized} "
+                    "(0.0.0.0 is not a valid connect target)."
+                )
+            self.env_endpoint = normalized
+
+        # Derive env_endpoints from env_endpoint + env_shards if requested.
+        if (not self.env_endpoints) and self.env_endpoint and self.env_shards > 1:
+            try:
+                parsed = urlparse(self.env_endpoint)
+                if parsed.port is None:
+                    raise ValueError("env_endpoint has no port")
+                base_port = parsed.port
+                self.env_endpoints = []
+                for i in range(self.env_shards):
+                    netloc = f"{parsed.hostname}:{base_port + i}"
+                    self.env_endpoints.append(
+                        urlunparse(parsed._replace(netloc=netloc))
+                    )
+                logger.warning(
+                    f"[GymEnvironmentInteraction] Using sharded env_endpoints (env_shards={self.env_shards}): "
+                    f"{self.env_endpoints[:3]}{'...' if len(self.env_endpoints) > 3 else ''}"
+                )
+            except Exception as e:
+                logger.warning(
+                    f"[GymEnvironmentInteraction] Failed to derive env_endpoints from env_endpoint/env_shards: {e}. "
+                    "Falling back to single env_endpoint."
+                )
         self.env_factory: Optional[Callable] = config.get("env_factory")
         self.max_steps: int = config.get("max_steps", 100)
         self.observation_template: str = config.get(
@@ -76,6 +140,85 @@ class GymEnvironmentInteraction(BaseInteraction):
 
         # For local environments, we can store the env objects
         self._local_envs: dict[str, Any] = {}
+
+        # For remote environments, keep a per-instance HTTP session.
+        #
+        # Why: when the env server runs with multiple uvicorn workers (multi-process),
+        # each worker has its own in-memory instance registry. If the client creates a
+        # new TCP connection per request, /reset and /step may hit different workers,
+        # causing "Instance ... not found. Call /reset first."
+        #
+        # A dedicated session per instance_id strongly increases connection stickiness
+        # (HTTP keep-alive), so all calls for a trajectory go to the same worker.
+        self._remote_sessions: dict[str, aiohttp.ClientSession] = {}
+        self._remote_timeout = aiohttp.ClientTimeout(total=600000)
+
+    def _route_endpoint(self, instance_id: str) -> str:
+        """Pick a stable endpoint for this instance_id.
+
+        When the env server is sharded across multiple ports (multiple single-worker
+        processes), this ensures all /reset and /step calls for a trajectory hit
+        the same shard, avoiding 'Instance not found' issues.
+        """
+        if self.env_endpoints:
+            idx = zlib.crc32(instance_id.encode("utf-8")) % len(self.env_endpoints)
+            return self.env_endpoints[idx]
+        if self.env_endpoint:
+            return self.env_endpoint
+        raise ValueError(
+            "Either env_factory or env_endpoint/env_endpoints must be configured"
+        )
+
+    def _get_remote_session(self, instance_id: str) -> aiohttp.ClientSession:
+        """Get or create a dedicated aiohttp session for this instance_id.
+
+        Session is keyed by (routed endpoint + instance_id) so a trajectory never
+        accidentally reuses a keep-alive connection across different shards.
+        """
+        session_key = f"{self._route_endpoint(instance_id)}::{instance_id}"
+        session = self._remote_sessions.get(session_key)
+        if session is not None and not session.closed:
+            return session
+
+        connector = aiohttp.TCPConnector(
+            limit=1,
+            limit_per_host=1,
+            enable_cleanup_closed=True,
+            ttl_dns_cache=300,
+            keepalive_timeout=300,
+        )
+        session = aiohttp.ClientSession(connector=connector)
+        self._remote_sessions[session_key] = session
+        return session
+
+    async def _retryable_post_json(
+        self, instance_id: str, url: str, payload: dict, timeout: aiohttp.ClientTimeout
+    ) -> dict:
+        """POST JSON with a single retry on connection reset (worker restart / stale keepalive)."""
+        session = self._get_remote_session(instance_id)
+        try:
+            async with session.post(url, json=payload, timeout=timeout) as response:
+                if response.status != 200:
+                    raise RuntimeError(f"{await response.text()}")
+                return await response.json()
+        except aiohttp.ClientOSError as e:
+            # Common when server side closes a keep-alive connection (errno 104).
+            logger.warning(
+                f"[GymEnvironmentInteraction] POST {url} failed with {type(e).__name__}: {e}. Retrying once..."
+            )
+            # Recreate session and retry once.
+            session_key = f"{self._route_endpoint(instance_id)}::{instance_id}"
+            old = self._remote_sessions.pop(session_key, None)
+            if old is not None and not old.closed:
+                try:
+                    await old.close()
+                except Exception:
+                    pass
+            session = self._get_remote_session(instance_id)
+            async with session.post(url, json=payload, timeout=timeout) as response:
+                if response.status != 200:
+                    raise RuntimeError(f"{await response.text()}")
+                return await response.json()
 
     async def start_interaction(
         self, instance_id: Optional[str] = None, **kwargs
@@ -208,6 +351,31 @@ class GymEnvironmentInteraction(BaseInteraction):
             if hasattr(env, "close"):
                 env.close()
 
+        # Notify remote game server to return instance to pool
+        if self.env_endpoint is not None or self.env_endpoints is not None:
+            try:
+                session = self._get_remote_session(instance_id)
+                async with session.post(
+                    f"{self._route_endpoint(instance_id)}/finalize",
+                    json={"instance_id": instance_id, "job_id": self.job_id},
+                    timeout=aiohttp.ClientTimeout(total=5),
+                ) as response:
+                    if response.status != 200:
+                        logger.warning(
+                            f"[finalize_interaction] Server returned {response.status}"
+                        )
+            except Exception as e:
+                logger.warning(f"[finalize_interaction] Failed to notify server: {e}")
+            finally:
+                # Always close and delete the dedicated session.
+                session_key = f"{self._route_endpoint(instance_id)}::{instance_id}"
+                session = self._remote_sessions.pop(session_key, None)
+                if session is not None and not session.closed:
+                    try:
+                        await session.close()
+                    except Exception:
+                        pass
+
     # #Note(Siqi): this will likely cause a bug
     # async def mark_truncated(self, instance_id: str, reason: str = "external_limit", **kwargs) -> None:
     #     """Mark a game as done due to external truncation (e.g., response_length limit).
@@ -284,26 +452,25 @@ class GymEnvironmentInteraction(BaseInteraction):
             observation = env.reset(**kwargs)
             return str(observation)
 
-        elif self.env_endpoint is not None:
+        elif self.env_endpoint is not None or self.env_endpoints is not None:
             # Remote environment via HTTP
-            async with aiohttp.ClientSession() as session:
-                async with session.post(
-                    f"{self.env_endpoint}/reset",
-                    json={"instance_id": instance_id, "job_id": self.job_id, **kwargs},
-                    timeout=aiohttp.ClientTimeout(total=600000),
-                ) as response:
-                    if response.status != 200:
-                        raise RuntimeError(
-                            f"Environment reset failed: {await response.text()}"
-                        )
-                    data = await response.json()
-                    # Return full data if board_state is present, else just observation
-                    if "board_state" in data:
-                        return data
-                    return data.get("observation", "")
+            url = f"{self._route_endpoint(instance_id)}/reset"
+            payload = {"instance_id": instance_id, "job_id": self.job_id, **kwargs}
+            try:
+                data = await self._retryable_post_json(
+                    instance_id, url, payload, timeout=self._remote_timeout
+                )
+            except RuntimeError as e:
+                raise RuntimeError(f"Environment reset failed: {e}")
+            # Return full data if board_state is present, else just observation
+            if "board_state" in data:
+                return data
+            return data.get("observation", "")
 
         else:
-            raise ValueError("Either env_factory or env_endpoint must be configured")
+            raise ValueError(
+                "Either env_factory or env_endpoint/env_endpoints must be configured"
+            )
 
     async def _call_env_step(
         self, instance_id: str, action: str
@@ -321,29 +488,26 @@ class GymEnvironmentInteraction(BaseInteraction):
             observation, reward, done, info = result
             return str(observation), float(reward), bool(done), info
 
-        elif self.env_endpoint is not None:
+        elif self.env_endpoint is not None or self.env_endpoints is not None:
             # Remote environment via HTTP
-            async with aiohttp.ClientSession() as session:
-                async with session.post(
-                    f"{self.env_endpoint}/step",
-                    json={
-                        "instance_id": instance_id,
-                        "job_id": self.job_id,
-                        "action": action,
-                    },
-                    timeout=aiohttp.ClientTimeout(total=600000),
-                ) as response:
-                    if response.status != 200:
-                        raise RuntimeError(
-                            f"Environment step failed: {await response.text()}"
-                        )
-                    data = await response.json()
-                    return (
-                        data.get("observation", ""),
-                        float(data.get("reward", 0.0)),
-                        bool(data.get("done", False)),
-                        data.get("info", {}),
-                    )
+            url = f"{self._route_endpoint(instance_id)}/step"
+            payload = {
+                "instance_id": instance_id,
+                "job_id": self.job_id,
+                "action": action,
+            }
+            try:
+                data = await self._retryable_post_json(
+                    instance_id, url, payload, timeout=self._remote_timeout
+                )
+            except RuntimeError as e:
+                raise RuntimeError(f"Environment step failed: {e}")
+            return (
+                data.get("observation", ""),
+                float(data.get("reward", 0.0)),
+                bool(data.get("done", False)),
+                data.get("info", {}),
+            )
 
         else:
             raise ValueError("No environment available for this instance")

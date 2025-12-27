@@ -298,7 +298,14 @@ class GenericAgentLoop(AgentLoopBase):
             )
 
         metrics = {}
-        request_id = uuid4().hex
+
+        # Use a stable request_id if available to allow environment reuse on the server.
+        # extra_info.sample_id is often a stable index for the worker/sample.
+        stable_id = kwargs.get("extra_info", {}).get("sample_id")
+        if stable_id is not None:
+            request_id = str(stable_id)
+        else:
+            request_id = uuid4().hex
 
         # CRITICAL: Extract multimodal data (images) from kwargs for VL models
         # This follows the verl pattern from single_turn_agent_loop.py
@@ -390,16 +397,25 @@ class GenericAgentLoop(AgentLoopBase):
 
         # State machine loop
         state = GenericAgentState.PENDING
-        while state != GenericAgentState.TERMINATED:
-            if state == GenericAgentState.PENDING:
-                state = await self._handle_pending_state(agent_data, sampling_params)
-            elif state == GenericAgentState.GENERATING:
-                state = await self._handle_generating_state(agent_data, sampling_params)
-            elif state == GenericAgentState.INTERACTING:
-                state = await self._handle_interacting_state(agent_data)
-            else:
-                logger.error(f"Invalid state: {state}")
-                state = GenericAgentState.TERMINATED
+        try:
+            while state != GenericAgentState.TERMINATED:
+                if state == GenericAgentState.PENDING:
+                    state = await self._handle_pending_state(
+                        agent_data, sampling_params
+                    )
+                elif state == GenericAgentState.GENERATING:
+                    state = await self._handle_generating_state(
+                        agent_data, sampling_params
+                    )
+                elif state == GenericAgentState.INTERACTING:
+                    state = await self._handle_interacting_state(agent_data)
+                else:
+                    logger.error(f"Invalid state: {state}")
+                    state = GenericAgentState.TERMINATED
+        finally:
+            # CRITICAL: Always finalize interaction to release resources (e.g. return to pool)
+            if agent_data.interaction is not None:
+                await agent_data.interaction.finalize_interaction(agent_data.request_id)
 
         # Finalize output
         response_ids = agent_data.prompt_ids[-len(agent_data.response_mask) :]

@@ -115,6 +115,18 @@ class GameEnvironment(BaseEnvironment):
             )
             # Use provided job_id or fallback to config or default
             self.job_id = job_id or interaction_config.get("job_id", "default")
+
+            # IMPORTANT: Preserve the full interaction.config dict (e.g., env_shards, env_endpoints, etc.).
+            # Previous code only forwarded a subset, which broke sharded env routing.
+            self._interaction_config_dict = (
+                OmegaConf.to_container(interaction_config, resolve=True) or {}
+            )
+            if not isinstance(self._interaction_config_dict, dict):
+                self._interaction_config_dict = {}
+            # Ensure job_id is injected/overridden for stats isolation.
+            self._interaction_config_dict["job_id"] = self.job_id
+            # Ensure env_endpoint is present (after possible templating).
+            self._interaction_config_dict.setdefault("env_endpoint", self.env_endpoint)
         else:
             self.env_endpoint = config.get("env_endpoint", "http://localhost:8081")
             self.max_steps = config.get("max_steps", 100)
@@ -122,18 +134,19 @@ class GameEnvironment(BaseEnvironment):
                 "observation_template", "{observation}"
             )
             self.job_id = job_id or config.get("job_id", "default")
+            self._interaction_config_dict = {
+                "env_endpoint": self.env_endpoint,
+                "max_steps": self.max_steps,
+                "observation_template": self.observation_template,
+                "job_id": self.job_id,
+            }
 
         # Create interaction spec
         self.interaction_specs = [
             InteractionSpec(
                 name=self.interaction_name,
                 class_path="opentinker.environment.gym_environment_interaction.GymEnvironmentInteraction",
-                config={
-                    "env_endpoint": self.env_endpoint,
-                    "max_steps": self.max_steps,
-                    "observation_template": self.observation_template,
-                    "job_id": self.job_id,
-                },
+                config=self._interaction_config_dict,
             )
         ]
 

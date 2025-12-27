@@ -38,7 +38,7 @@ def main(args):
     if not args.data_path:
         raise ValueError("data_path is required")
 
-    results = run_inference(
+    run_inference(
         model_path=args.model_path,
         data_path=args.data_path,
         game_class=MathGame,

@@ -74,7 +74,7 @@ def main(args):
         f"  - Max tokens: {args.max_new_tokens} total, {args.get('max_tokens_per_turn', 'unlimited')} per turn"
     )
 
-    results = run_inference(
+    run_inference(
         model_path=None,  # Not needed when using vllm_server_url
         vllm_server_url=vllm_server_url,
         tokenizer_path=args.get("tokenizer_path") or args.model_path,
