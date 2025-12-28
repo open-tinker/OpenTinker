@@ -8,8 +8,9 @@ Usage:
     # Or with custom config:
     python alfworld_server.py --port 8082 --max_steps 50
 
-    # For TRUE parallelism (recommended for training):
-    python alfworld_server.py --port 8092 --workers 8
+    # For parallelism (recommended for training):
+    python alfworld_server.py --port 8091 --shards 8
+    # This launches 8 independent servers on ports 8091..8098
 """
 
 import os
@@ -22,7 +23,6 @@ import os
 os.environ["CUDA_VISIBLE_DEVICES"] = ""
 
 import argparse
-import json
 import subprocess
 import sys
 import time
@@ -36,9 +36,9 @@ def main():
         "--shards",
         type=int,
         default=8,
-        help="Number of independent single-worker server processes to launch on consecutive ports. "
-        "Recommended for stateful env parallelism. Example: --port 8091 --shards 8 "
-        "will launch 8 servers on 8091..8098, each with --workers 1.",
+        help="Number of independent server processes to launch on consecutive ports. "
+        "Example: --port 8091 --shards 8 will launch 8 servers on 8091..8098. "
+        "Each shard handles requests independently for true parallelism.",
     )
     parser.add_argument(
         "--config_path", type=str, default=None, help="Path to ALFWorld config file"
@@ -59,20 +59,6 @@ def main():
         default=-1,
         help="Number of games to load (-1 = all games, e.g. 64 for faster loading)",
     )
-    parser.add_argument(
-        "--pool_size",
-        type=int,
-        default=0,
-        help="Number of game instances to pre-initialize per worker",
-    )
-    parser.add_argument(
-        "--workers",
-        type=int,
-        default=1,
-        help="Number of worker PROCESSES for TRUE parallelism. "
-        "Each worker is a separate process with its own Python interpreter. "
-        "Recommended: 8-16 for training (matches batch_size * rollout_n).",
-    )
     args = parser.parse_args()
 
     # Import here to avoid issues with multiprocessing
@@ -82,10 +68,7 @@ def main():
     print(f"  Max steps: {args.max_steps}")
     print(f"  Split: {args.split}")
     print(f"  Num games: {args.num_games if args.num_games > 0 else 'all'}")
-    print(f"  Pool size per worker: {args.pool_size if args.pool_size > 0 else 'none'}")
-    print(
-        f"  Workers: {args.workers} {'(TRUE parallelism via multi-process)' if args.workers > 1 else '(single process)'}"
-    )
+    print(f"  Shards: {args.shards}")
     print(f"  Config: {args.config_path or 'default'}")
     print("\nReward structure:")
     print(f"  Success: +{ALFWorldGame.REWARD_SUCCESS}")
@@ -94,8 +77,8 @@ def main():
     print(f"  Invalid action: {ALFWorldGame.REWARD_INVALID_ACTION}")
 
     # Sharded mode: launch N separate single-worker servers on consecutive ports.
-    # This avoids cross-worker in-memory state issues (instance_id -> game) that occur
-    # with uvicorn --workers > 1 on a single port.
+    # Each shard is an independent process with its own in-memory instance registry.
+    # This avoids cross-process state issues and provides true parallelism.
     if args.shards and args.shards > 1:
         print(
             f"\nStarting sharded mode: {args.shards} shards on ports {args.port}..{args.port + args.shards - 1}"
@@ -115,8 +98,6 @@ def main():
                     args.host,
                     "--port",
                     str(port_i),
-                    "--workers",
-                    "1",
                     "--shards",
                     "1",
                     "--max_steps",
@@ -125,8 +106,6 @@ def main():
                     args.split,
                     "--num_games",
                     str(args.num_games),
-                    "--pool_size",
-                    str(args.pool_size),
                 ]
                 if args.config_path is not None:
                     cmd.extend(["--config_path", args.config_path])
@@ -163,75 +142,18 @@ def main():
                         pass
         return
 
-    if args.workers > 1:
-        # Multi-process mode for TRUE parallelism
-        # Each worker process has its own Python interpreter and tatsu parser
-        import uvicorn
+    # Single shard mode: run one server process
+    from opentinker.environment.base_game_server import run_game_server
 
-        # Store config in environment for workers to pick up
-        os.environ["_ALFWORLD_SERVER_CONFIG"] = json.dumps(
-            {
-                "pool_size": args.pool_size,
-                "config_path": args.config_path,
-                "max_steps": args.max_steps,
-                "split": args.split,
-                "num_games": args.num_games,
-            }
-        )
-
-        print(f"\nStarting {args.workers} worker processes...")
-        print("Each process has independent TextWorld parser - TRUE parallelism!\n")
-
-        uvicorn.run(
-            "opentinker.environment.alfworld.alfworld_server:create_app",
-            host=args.host,
-            port=args.port,
-            workers=args.workers,
-            log_level="warning",
-        )
-    else:
-        # Single process mode
-        from opentinker.environment.base_game_server import run_game_server
-
-        run_game_server(
-            game_class=ALFWorldGame,
-            host=args.host,
-            port=args.port,
-            stats_class=None,
-            pool_size=args.pool_size,
-            use_thread_pool=False,  # CRITICAL: tatsu parser is NOT thread-safe
-            config_path=args.config_path,
-            max_steps=args.max_steps,
-            split=args.split,
-            num_games=args.num_games,
-        )
-
-
-def create_app():
-    """Factory function for multi-worker mode. Called by each worker process."""
-    import json
-    import os
-
-    # CRITICAL: Must set CUDA_VISIBLE_DEVICES BEFORE importing anything that uses torch!
-    # Each worker process needs to set this independently.
-    os.environ["CUDA_VISIBLE_DEVICES"] = ""
-
-    from opentinker.environment.base_game_server import create_game_app
-    from opentinker.environment.alfworld.alfworld_game import ALFWorldGame
-
-    config = json.loads(os.environ.get("_ALFWORLD_SERVER_CONFIG", "{}"))
-
-    print(f"[Worker PID {os.getpid()}] Initializing ALFWorld environment...")
-
-    return create_game_app(
-        ALFWorldGame,
+    run_game_server(
+        game_class=ALFWorldGame,
+        host=args.host,
+        port=args.port,
         stats_class=None,
-        pool_size=config.get("pool_size", 0),
-        use_thread_pool=False,  # CRITICAL: Disable thread pool - tatsu parser is NOT thread-safe
-        config_path=config.get("config_path"),
-        max_steps=config.get("max_steps", 50),
-        split=config.get("split", "train"),
-        num_games=config.get("num_games", 10),
+        config_path=args.config_path,
+        max_steps=args.max_steps,
+        split=args.split,
+        num_games=args.num_games,
     )
 
 

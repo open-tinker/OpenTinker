@@ -83,8 +83,7 @@ class ALFWorldGame(AbstractGame):
     _cache_lock = threading.Lock()
 
     # NOTE: TextWorld's tatsu parser is NOT thread-safe.
-    # We use use_thread_pool=False in the server to disable threading.
-    # Parallelism comes from multi-process mode (--workers 8).
+    # Parallelism is achieved via sharding (--shards N launches N independent server processes).
 
     def __init__(
         self,
@@ -342,7 +341,7 @@ class ALFWorldGame(AbstractGame):
         )
 
         # Direct loading: bypass ALFWorld's init_env which scans all 8810 games
-        # Thread safety: use_thread_pool=False in server, parallelism from multi-process mode
+        # Thread safety: parallelism comes from sharding (multiple server processes)
         self._tw_env = textworld.start(
             game_file, infos, wrappers=[Filter, AlfredDemangler()]
         )
@@ -419,7 +418,7 @@ class ALFWorldGame(AbstractGame):
 
         # Execute action in TextWorld environment
         # TextWorld returns: game_state, reward, done, info
-        # Thread safety: use_thread_pool=False in server, parallelism from multi-process mode
+        # Thread safety: parallelism comes from sharding (multiple server processes)
         game_state, reward, done, info = self._tw_env.step(parsed_action)
 
         # Extract observation from game_state
