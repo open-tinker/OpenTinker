@@ -324,8 +324,8 @@ class ALFWorldGame(AbstractGame):
         if self._tw_env is not None:
             try:
                 self._tw_env.close()
-            except Exception:
-                pass
+            except Exception as e:
+                logging.warning("Failed to close previous TextWorld environment: %s", e)
 
         # Create TextWorld environment with direct file loading (no disk scan!)
         infos = textworld.EnvInfos(
