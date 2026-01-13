@@ -6,6 +6,7 @@
   </p>
 
   <p>
+    <a href="https://arxiv.org/abs/2601.07376">Paper</a> ·
     <a href="https://open-tinker.github.io/opentinker-page/">Project Page</a> ·
     <a href="https://deepwiki.com/open-tinker/OpenTinker">DeepWiki</a> ·
     <a href="https://join.slack.com/t/opentinker/shared_invite/zt-3lnxuxkfr-QZpzObNvW0DtcQUWzvKtQg">Slack</a> ·
