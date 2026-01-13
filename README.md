@@ -118,7 +118,8 @@ user_db_path: "scheduler_users.db"
 Run the server to set up the backend:
 
 ```bash
-python opentinker/scheduler/launch_scheduler_legacy.py
+chmod +x opentinker/scripts/launch_scheduler.sh
+opentinker/scripts/launch_scheduler.sh
 ```
 
 Run the interactive script to register a user and get an API key:
