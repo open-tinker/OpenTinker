@@ -1,0 +1,83 @@
+# AndroidWorld Training Configuration
+# Use with: python android_world_rl.py
+
+# Project settings
+project_name: opentinker
+experiment_name: android_world_training
+
+# Logging
+logger_backends: ["console", "wandb"]
+
+# Tracing (optional)
+enable_tracing: true
+weave_project: null
+
+# WandB (optional)
+wandb_key: null
+
+# Model and tokenizer
+tokenizer_path: null
+
+# Training parameters
+batch_size: 4
+num_workers: 4
+# Training duration - set ONE of these (num_steps takes precedence if both set)
+num_epochs: null # Number of epochs (null = use num_steps)
+num_steps: 1000 # Total training steps (null = use num_epochs)
+save_freq: 20000
+test_freq: 10 # Validation frequency (every N steps)
+
+# Validation parameters
+val_batch_size: 50 # Total validation samples (null = 50)
+
+# Model parameters
+# Generation parameters
+temperature: 1 # Lower temperature for more focused responses
+top_p: 1
+max_new_tokens: 8192 # TOTAL response budget for entire multi-turn trajectory (NOT per-turn!)
+max_prompt_tokens: 4096
+
+# Algorithm (must be agent_loop for multi-turn)
+algorithm: "agent_loop"
+
+# RL Algorithm settings (passed to server via scheduler)
+# adv_estimator options:
+#   - "grpo"          : Standard GRPO (outcome-only advantage)
+#   - "grpo_per_step" : Per-step GRPO with return-based advantages (for multi-turn tasks)
+#   - "gae"           : Generalized Advantage Estimation (for PPO, requires critic)
+adv_estimator: "grpo"
+# rollout_n: number of samples per prompt for GRPO/grpo_per_step
+# For PPO (gae), rollout_n is typically 1
+rollout_n: 8
+
+# Interaction configuration
+interaction:
+  name: android_world
+  class_path: opentinker.environment.gym_environment_interaction.GymEnvironmentInteraction
+  config:
+    env_host: 0.0.0.0
+    env_port: 8092
+    env_endpoint: http://${interaction.config.env_host}:${interaction.config.env_port}
+    # If you run the AndroidWorld env server in sharded mode (--shards N),
+    # set env_shards=N. The client will route each instance_id to a stable shard.
+    env_shards: 32
+    max_steps: 20 # AndroidWorld episodes max steps
+    max_total_steps: 20 # Max environment step calls (controls rollout turns)
+    observation_template: "{observation}"
+    # AndroidWorld specific settings
+    split: train # train, eval_in_distribution, eval_out_of_distribution
+
+multi_turn:
+  max_user_turns: ${interaction.config.max_total_steps}
+  max_assistant_turns: ${interaction.config.max_total_steps}
+  max_tokens_per_turn: 512 # Per-turn response limit (optional, null for no limit)
+  # Weave tracing (optional - runs on SERVER side)
+  weave_project: "zsqzz/android-world-env-test"
+  experiment_name: "android_world_interaction"
+
+# Scheduler settings
+scheduler_url: "http://0.0.0.0:8780"
+scheduler_api_key: null
+
+# GPU settings
+num_gpus: 4
