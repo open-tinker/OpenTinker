@@ -60,7 +60,7 @@ interaction:
     env_endpoint: http://${interaction.config.env_host}:${interaction.config.env_port}
     # If you run the AndroidWorld env server in sharded mode (--shards N),
     # set env_shards=N. The client will route each instance_id to a stable shard.
-    env_shards: 32
+    env_shards: 1
     max_steps: 20 # AndroidWorld episodes max steps
     max_total_steps: 20 # Max environment step calls (controls rollout turns)
     observation_template: "{observation}"

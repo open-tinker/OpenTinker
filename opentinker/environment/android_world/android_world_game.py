@@ -14,6 +14,9 @@ from opentinker.environment.android_world import prompts
 # Ensure android_world is in path if it's in the current directory
 if os.path.exists("android_world"):
     sys.path.append(os.path.abspath("android_world"))
+os.environ["ADB_PATH"] = "/home/yixingc/android-sdk/platform-tools/adb"
+os.environ["ANDROID_CONSOLE_PORT"] = "5556"
+os.environ["ANDROID_GRPC_PORT"] = "8554"
 
 # AndroidWorld imports
 try:

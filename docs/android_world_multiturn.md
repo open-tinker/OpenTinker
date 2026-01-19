@@ -1,19 +1,102 @@
-# AndroidWorld Environment Documentation
+# LLM Game Agent (AndroidWorld Multi-Turn)
 
-**AndroidWorld** is a dynamic benchmarking environment for autonomous agents to interact with the Android operating system. This guide covers the installation, setup, and usage of the AndroidWorld environment within the OpenTinker framework.
+This example demonstrates training a language model to complete tasks in the Android operating system environment using AndroidWorld.
 
-## 1. Prerequisites
+## Overview
 
-*   **OS:** Linux (Ubuntu 22.04+ recommended) or macOS.
-*   **Hardware:**
-    *   **CPU:** x86_64 architecture (recommended) or ARM64 (Apple Silicon).
-    *   **RAM:** 16GB+ recommended.
-    *   **Virtualization:** KVM (Linux) or HAXM (macOS) support is highly recommended for emulator performance. *Note: Software emulation is possible but significantly slower.*
-*   **Software:** Python 3.11+, Java (JDK 17+), unzip, wget.
+**AndroidWorld** is a dynamic benchmarking environment for autonomous agents to interact with the Android operating system. The agent perceives the screen via a list of UI elements and interacts by performing actions like clicking, typing, and scrolling.
 
-## 2. Installation & Setup
+Tasks include:
+- Adding contacts
+- Managing settings
+- Browsing information
+- Sending messages
+- And more...
 
-### 2.1. Android SDK & Command Line Tools
+## Prerequisites
+
+1.  Complete the [Installation](../README.md#-installation) steps.
+2.  **Environment Setup**: You must install the Android SDK and run an Emulator. See the **[Detailed Environment Setup](#detailed-environment-setup)** section below for instructions.
+3.  Get your IP address: `hostname -I`
+
+## Step 1: Start the Scheduler (Server Side)
+
+```bash
+bash opentinker/scripts/launch_scheduler.sh --scheduler-port <scheduler_port>
+```
+
+## Step 2: Start the AndroidWorld Environment (Server Side)
+
+Before starting the environment server, ensure your Android Emulator is running (see setup below).
+
+```bash
+python -m opentinker.environment.android_world.android_world_server \
+    --port 8092 \
+    --max_steps 50 \
+    --split train
+```
+
+**Server Options:**
+
+- `--port`: Server port (default: 8082, recommend 8092 to match client config)
+- `--max_steps`: Max steps per episode (default: 50)
+- `--split`: Dataset split (`train`, `eval_in_distribution`, `eval_out_of_distribution`)
+- `--shards`: Number of parallel server instances (for parallel training)
+
+## Step 3: Run Training
+
+```bash
+python opentinker/client/android_world_rl.py \
+    tokenizer_path=Qwen/Qwen2.5-3B-Instruct \
+    batch_size=4 \
+    val_batch_size=50 \
+    num_steps=1000 \
+    save_freq=20000 \
+    test_freq=10 \
+    scheduler_url=http://<server_endpoint>:<scheduler_port> \
+    interaction.config.env_port=8092 \
+    interaction.config.env_host=<env_server_endpoint>
+```
+
+**Training Parameters:**
+
+- `num_steps`: Total training steps (alternative: use `num_epochs`)
+- `batch_size`: Training batch size
+- `val_batch_size`: Validation samples per evaluation
+- `test_freq`: Validation frequency (every N steps)
+- `adv_estimator`: Advantage estimator (`gae`, `grpo`, `grpo_per_step`)
+
+## Reward Structure
+
+| Event            | Reward |
+| :--------------- | ------ |
+| Task Success     | +10.0  |
+| Task Failure     | -1.0   |
+| Per Step Penalty | -0.01  |
+| Invalid Action   | -0.1   |
+
+## Example Actions
+
+The agent interacts with the environment by outputting JSON commands referencing UI element indices:
+
+- **Click**: `{"action_type": "click", "index": 4}`
+- **Type**: `{"action_type": "input_text", "text": "Alice", "index": 2}`
+- **Scroll**: `{"action_type": "scroll", "direction": "down"}`
+- **Open App**: `{"action_type": "open_app", "app_name": "Settings"}`
+- **Navigate Home**: `{"action_type": "navigate_home"}`
+- **Navigate Back**: `{"action_type": "navigate_back"}`
+- **Answer Question**: `{"action_type": "answer", "text": "It is 5 PM."}`
+- **Finish Task**: `{"action_type": "status", "goal_status": "complete"}`
+
+## Configuration Reference
+
+See [`opentinker/client/client_config/android_world_param.yaml`](../opentinker/client/client_config/android_world_param.yaml) for full configuration options.
+
+---
+
+## Detailed Environment Setup
+
+### 1. Android SDK & Command Line Tools
 
 If you do not have Android Studio installed, you can set up the command-line tools manually.
 
@@ -51,7 +134,7 @@ If you do not have Android Studio installed, you can set up the command-line too
     export PATH="$JAVA_HOME/bin:$ANDROID_HOME/cmdline-tools/latest/bin:$ANDROID_HOME/platform-tools:$ANDROID_HOME/emulator:$PATH"
     ```
 
-### 2.2. Create Android Virtual Device (AVD)
+### 2. Create Android Virtual Device (AVD)
 
 Create an AVD named `AndroidWorldAvd` targeting Android 13 (Tiramisu, API 33).
 
@@ -71,18 +154,18 @@ Create an AVD named `AndroidWorldAvd` targeting Android 13 (Tiramisu, API 33).
     ```
     *(Replace `x86_64` with `arm64-v8a` if applicable)*
 
-### 2.3. Launch Emulator
+### 3. Launch Emulator
 
-Start the emulator in a separate terminal or background process.
+Start the emulator in a separate terminal or background process using the `sg` command to ensure correct group permissions (e.g., `kvm`).
 
 *   **Standard Launch (with GUI):**
     ```bash
-    emulator -avd AndroidWorldAvd -no-snapshot -grpc 8554
+    sg kvm -c "emulator -avd AndroidWorldAvd -no-snapshot -grpc 8554"
     ```
 
 *   **Headless Launch (Server/Docker):**
     ```bash
-    emulator -avd AndroidWorldAvd -no-snapshot -grpc 8554 -no-window -no-audio
+    sg kvm -c "emulator -avd AndroidWorldAvd -no-snapshot -grpc 8554 -no-window -no-audio"
     ```
 
 *   **Software Emulation (No KVM):**
@@ -91,64 +174,7 @@ Start the emulator in a separate terminal or background process.
     emulator -avd AndroidWorldAvd -no-snapshot -grpc 8554 -no-window -no-audio -accel off
     ```
 
-## 3. Usage with OpenTinker
-
-OpenTinker provides a wrapper class `AndroidWorldGame` to interact with the environment.
-
-### 3.1. Implementation Details
-*   **Class:** `opentinker.environment.android_world.android_world_game.AndroidWorldGame`
-*   **Base Class:** `AbstractGame`
-
-### 3.2. Initialization
-The environment automatically connects to the running emulator via ADB and gRPC.
-
-```python
-from opentinker.environment.android_world.android_world_game import AndroidWorldGame
-
-# Initialize the game
-env = AndroidWorldGame(
-    max_steps=20,
-    task_types=["ContactsAddContact"] # Optional: Specify task
-)
-
-# Reset to start a new episode
-observation = env.reset()
-print(observation)
-```
-
-### 3.3. Action Space
-The agent communicates using structured text commands.
-
-| Action | Format | Description |
-| :--- | :--- | :--- |
-| **Tap** | `tap(x, y)` | Taps the screen at coordinates (x, y). |
-| **Type** | `type("text")` | Types the specified text string. |
-| **Scroll** | `scroll(direction)` | Scrolls `up`, `down`, `left`, or `right`. |
-| **Home** | `home` | Presses the Home button. |
-| **Back** | `back` | Presses the Back button. |
-| **Enter** | `enter` | Presses the Enter/Return key. |
-
-### 3.4. Observation Space
-The observation returned by the environment includes:
-1.  **Task Description:** The goal the agent needs to achieve.
-2.  **Visible Elements:** A text representation of interactable UI elements (buttons, text fields) visible on the current screen.
-
-**Example Observation:**
-```text
-Task: Add a contact named "Alice" with phone "123-456-7890".
-
-=== Current Screen ===
-Visible Elements:
-- Create new contact at [800, 2000]
-- Search contacts at [100, 150]
-
-=== Available Actions ===
-- tap(x, y)
-- type(text)
-...
-```
-
-## 4. Troubleshooting
+## Troubleshooting
 
 *   **"KVM is not found"**: Ensure virtualization is enabled in your BIOS/Hypervisor. On Linux, check permissions for `/dev/kvm`. If in a container, run with `--device /dev/kvm`.
 *   **Emulator crashes immediately**: Check logs. If running x86_64 image on ARM or vice-versa, the emulator will fail. Use the correct system image for your host architecture.

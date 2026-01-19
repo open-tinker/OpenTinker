@@ -423,6 +423,14 @@ class GenericAgentLoop(AgentLoopBase):
             : len(agent_data.prompt_ids) - len(agent_data.response_mask)
         ]
 
+        # Truncate prompt_ids if they exceed prompt_length (left truncate to keep recent context)
+        # This prevents tensor size mismatches in verl's batch processing when context overflows
+        if len(prompt_ids) > self.prompt_length:
+            logger.warning(
+                f"[GenericAgentLoop] Truncating prompt from {len(prompt_ids)} to {self.prompt_length} tokens"
+            )
+            prompt_ids = prompt_ids[-self.prompt_length :]
+
         # Calculate final reward (sum of all turn scores)
         # Return 0.0 if no turn scores collected - this prevents fallback to naive reward loop
         # which expects ground_truth data that gym environments don't provide
