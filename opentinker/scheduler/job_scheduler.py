@@ -1131,15 +1131,16 @@ class JobSchedulerActor:
             )
 
         # Forward WM dynamic entropy settings if specified
+        # Use + prefix to add new config keys that may not exist in the base schema
         wm_dynamic_entropy = actor_config.get("wm_dynamic_entropy", {})
         if wm_dynamic_entropy.get("enabled"):
-            cmd.append("actor_rollout_ref.actor.wm_dynamic_entropy.enabled=true")
+            cmd.append("+actor_rollout_ref.actor.wm_dynamic_entropy.enabled=true")
             beta_0 = wm_dynamic_entropy.get("beta_0", 0.001)
             beta_1 = wm_dynamic_entropy.get("beta_1", 0.01)
             gamma = wm_dynamic_entropy.get("gamma", 1.0)
-            cmd.append(f"actor_rollout_ref.actor.wm_dynamic_entropy.beta_0={beta_0}")
-            cmd.append(f"actor_rollout_ref.actor.wm_dynamic_entropy.beta_1={beta_1}")
-            cmd.append(f"actor_rollout_ref.actor.wm_dynamic_entropy.gamma={gamma}")
+            cmd.append(f"+actor_rollout_ref.actor.wm_dynamic_entropy.beta_0={beta_0}")
+            cmd.append(f"+actor_rollout_ref.actor.wm_dynamic_entropy.beta_1={beta_1}")
+            cmd.append(f"+actor_rollout_ref.actor.wm_dynamic_entropy.gamma={gamma}")
             logger.info(
                 f"Job {job.job_id}: ✓ WM Dynamic Entropy enabled: beta_0={beta_0}, beta_1={beta_1}, gamma={gamma}"
             )
