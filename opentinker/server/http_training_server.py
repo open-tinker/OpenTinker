@@ -1119,6 +1119,37 @@ class PPOTrainingServerBackend:
                     norm_adv_by_std_in_grpo=norm_adv_by_std_in_grpo,
                     config=self.config.algorithm,
                 )
+                
+                # =====================================================================
+                # WM-Guided Dynamic Entropy: Compute beta_token at trainer level
+                # This ensures stable weights across PPO epochs (using lagged θ^-)
+                # =====================================================================
+                actor_config = self.config.actor_rollout_ref.actor
+                # Handle both dict and dataclass/OmegaConf access patterns
+                if hasattr(actor_config, 'get'):
+                    wm_dynamic_entropy_config = actor_config.get("wm_dynamic_entropy", {})
+                elif hasattr(actor_config, 'wm_dynamic_entropy'):
+                    wm_dynamic_entropy_config = actor_config.wm_dynamic_entropy
+                else:
+                    wm_dynamic_entropy_config = {}
+                
+                # Check if enabled
+                is_enabled = False
+                if isinstance(wm_dynamic_entropy_config, dict):
+                    is_enabled = wm_dynamic_entropy_config.get("enabled", False)
+                elif hasattr(wm_dynamic_entropy_config, 'enabled'):
+                    is_enabled = wm_dynamic_entropy_config.enabled
+                elif hasattr(wm_dynamic_entropy_config, 'get'):
+                    is_enabled = wm_dynamic_entropy_config.get("enabled", False)
+                
+                print(f"[WM Dynamic Entropy] DEBUG: is_enabled = {is_enabled}, config type = {type(wm_dynamic_entropy_config)}")
+                
+                if is_enabled:
+                    with marked_timer("wm_beta_token", timing_raw, color="magenta"):
+                        batch, wm_metrics = self.trainer._compute_wm_beta_token(
+                            batch, wm_dynamic_entropy_config
+                        )
+                        metrics.update(wm_metrics)
 
             # 10. Update critic
             if self.use_critic:
