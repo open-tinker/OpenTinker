@@ -24,8 +24,8 @@ num_workers: 4
 # Training duration - set ONE of these (num_steps takes precedence if both set)
 num_epochs: null # Number of epochs (null = use num_steps)
 num_steps: 1000 # Total training steps (null = use num_epochs)
-save_freq: 20000
-test_freq: 10 # Validation frequency (every N steps)
+save_freq: 10000
+test_freq: 100 # Validation frequency (every N steps)
 
 # Validation parameters
 val_batch_size: 50 # Total validation samples (null = 50)
@@ -81,3 +81,21 @@ scheduler_api_key: otk_98b8db24ccd64c92e1fdd9a232e209fa
 
 # GPU settings
 num_gpus: 4
+
+# Actor settings (passed to server)
+actor:
+  # World model loss: predict environment observations as auxiliary task
+  # 训练模型预测环境观察，提供 WM 不确定性信号
+  use_world_model_loss: true
+  world_model_loss_coef: 0.005  # 用小系数避免干扰 policy
+  
+  # Turn-wise Dynamic Entropy Coefficient (WM-guided)
+  # 根据每个 turn 的 WM uncertainty 调整 entropy bonus
+  # 高 uncertainty turn -> 高 β -> 更多探索
+  # 低 uncertainty turn -> 低 β -> 更稳定执行
+  wm_dynamic_entropy:
+    enabled: true
+    # β_t = β_0 + β_1 * sigmoid(γ * z_t), where z_t is z-score of uncertainty
+    beta_0: 0.001   # 基础熵系数 (WM 确定时用这个)
+    beta_1: 0.01    # 熵系数 scale (WM 不确定时增加这么多)
+    gamma: 1.0      # sigmoid 陡度 (控制过渡平滑度)

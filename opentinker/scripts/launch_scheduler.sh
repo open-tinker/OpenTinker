@@ -11,6 +11,9 @@ export NVCC_EXECUTABLE=$CUDA_HOME/bin/nvcc
 export TORCH_CUDA_ARCH_LIST="9.0"
 export FLASHINFER_HOMOGENEOUS_MS=1
 
+# Disable sleep mode to avoid cumem allocator CUDA errors (V1 required for async engine)
+export VLLM_DISABLE_SLEEP_MODE=1
+
 # Default configuration
 AVAILABLE_GPUS="[0,1,2,3,4,5,6,7,8,9]"
 PORT_RANGE="null"  # Set to null for auto-detection
