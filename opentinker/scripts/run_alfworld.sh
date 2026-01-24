@@ -1,6 +1,6 @@
 #!/bin/bash
 # ALFWorld Training & Inference Script
-# 
+#
 # This script runs ALFWorld RL training or inference with OpenTinker.
 # You need to run these steps in SEPARATE terminals.
 #
@@ -45,7 +45,7 @@ case "$1" in
             --scheduler-port $SCHEDULER_PORT \
             --gpus "$GPUS"
         ;;
-    
+
     env|2)
         echo "========================================"
         echo "Step 2: Starting ALFWorld Environment Server on ports $ENV_PORT-$((ENV_PORT+7)) (8 shards)"
@@ -56,7 +56,7 @@ case "$1" in
             --split train \
             --max_steps 50
         ;;
-    
+
     env-eval)
         echo "========================================"
         echo "Step 2 (Eval): Starting ALFWorld Environment Server for Evaluation"
@@ -67,7 +67,7 @@ case "$1" in
             --split eval_in_distribution \
             --max_steps 50
         ;;
-    
+
     client|3)
         echo "========================================"
         echo "Step 3: Running ALFWorld RL Client"
@@ -85,7 +85,7 @@ case "$1" in
             interaction.config.env_host=0.0.0.0 \
             interaction.config.env_shards=8
         ;;
-    
+
     inference|4)
         echo "========================================"
         echo "Step 3 (Inference): Running ALFWorld Evaluation"
@@ -99,7 +99,7 @@ case "$1" in
             split=eval_in_distribution \
             "$@"
         ;;
-    
+
     *)
         echo "ALFWorld Training & Inference Script"
         echo ""

@@ -1114,18 +1114,18 @@ class JobSchedulerActor:
         # Forward world model loss settings if specified
         actor_config = job.config.get("actor", {})
         if actor_config.get("use_world_model_loss"):
-            cmd.append(f"actor_rollout_ref.actor.use_world_model_loss=true")
+            cmd.append("actor_rollout_ref.actor.use_world_model_loss=true")
             wm_coef = actor_config.get("world_model_loss_coef", 0.1)
             cmd.append(f"actor_rollout_ref.actor.world_model_loss_coef={wm_coef}")
-            logger.info(
-                f"Job {job.job_id}: ✓ World Model Loss enabled: coef={wm_coef}"
-            )
-        
+            logger.info(f"Job {job.job_id}: ✓ World Model Loss enabled: coef={wm_coef}")
+
         # Forward WM active sampling settings if specified
         if actor_config.get("wm_active_sampling"):
-            cmd.append(f"actor_rollout_ref.actor.wm_active_sampling=true")
+            cmd.append("actor_rollout_ref.actor.wm_active_sampling=true")
             wm_active_coef = actor_config.get("wm_active_sampling_coef", 0.5)
-            cmd.append(f"actor_rollout_ref.actor.wm_active_sampling_coef={wm_active_coef}")
+            cmd.append(
+                f"actor_rollout_ref.actor.wm_active_sampling_coef={wm_active_coef}"
+            )
             logger.info(
                 f"Job {job.job_id}: ✓ WM Active Sampling enabled: coef={wm_active_coef}"
             )

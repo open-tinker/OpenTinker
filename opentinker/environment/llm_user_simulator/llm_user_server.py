@@ -5,7 +5,7 @@ This script starts an LLM user simulator server.
 
 Usage:
     python llm_user_server.py --port 8100 --shards 8
-    
+
     # With custom model:
     python llm_user_server.py --port 8100 --simulator_model gpt-4o-mini
 """
@@ -43,7 +43,12 @@ def main():
         "--task_type",
         type=str,
         default="customer_service",
-        choices=["customer_service", "booking_assistant", "tech_support", "information_seeking"],
+        choices=[
+            "customer_service",
+            "booking_assistant",
+            "tech_support",
+            "information_seeking",
+        ],
         help="Type of user simulation task",
     )
     parser.add_argument(
@@ -76,7 +81,7 @@ def main():
         help="Model for LLM judge (defaults to simulator_model)",
     )
     args = parser.parse_args()
-    
+
     # Handle --no_llm_judge flag
     if args.no_llm_judge:
         args.use_llm_judge = False
@@ -114,13 +119,20 @@ def main():
                 cmd = [
                     sys.executable,
                     os.path.abspath(__file__),
-                    "--host", args.host,
-                    "--port", str(port_i),
-                    "--shards", "1",
-                    "--simulator_model", args.simulator_model,
-                    "--task_type", args.task_type,
-                    "--max_turns", str(args.max_turns),
-                    "--temperature", str(args.temperature),
+                    "--host",
+                    args.host,
+                    "--port",
+                    str(port_i),
+                    "--shards",
+                    "1",
+                    "--simulator_model",
+                    args.simulator_model,
+                    "--task_type",
+                    args.task_type,
+                    "--max_turns",
+                    str(args.max_turns),
+                    "--temperature",
+                    str(args.temperature),
                 ]
                 if args.simulator_base_url:
                     cmd.extend(["--simulator_base_url", args.simulator_base_url])
@@ -137,7 +149,9 @@ def main():
                 for p in children:
                     rc = p.poll()
                     if rc is not None:
-                        raise RuntimeError(f"Shard exited early: pid={p.pid}, code={rc}")
+                        raise RuntimeError(
+                            f"Shard exited early: pid={p.pid}, code={rc}"
+                        )
                 time.sleep(1.0)
         except KeyboardInterrupt:
             pass
@@ -177,4 +191,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

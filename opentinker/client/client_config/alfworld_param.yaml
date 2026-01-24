@@ -87,8 +87,8 @@ actor:
   # World model loss: predict environment observations as auxiliary task
   # 训练模型预测环境观察，提供 WM 不确定性信号
   use_world_model_loss: true
-  world_model_loss_coef: 0.005  # 用小系数避免干扰 policy
-  
+  world_model_loss_coef: 0.005 # 用小系数避免干扰 policy
+
   # Turn-wise Dynamic Entropy Coefficient (WM-guided)
   # 根据每个 turn 的 WM uncertainty 调整 entropy bonus
   # 高 uncertainty turn -> 高 β -> 更多探索
@@ -96,6 +96,6 @@ actor:
   wm_dynamic_entropy:
     enabled: true
     # β_t = β_0 + β_1 * sigmoid(γ * z_t), where z_t is z-score of uncertainty
-    beta_0: 0.001   # 基础熵系数 (WM 确定时用这个)
-    beta_1: 0.01    # 熵系数 scale (WM 不确定时增加这么多)
-    gamma: 1.0      # sigmoid 陡度 (控制过渡平滑度)
+    beta_0: 0.001 # 基础熵系数 (WM 确定时用这个)
+    beta_1: 0.01 # 熵系数 scale (WM 不确定时增加这么多)
+    gamma: 1.0 # sigmoid 陡度 (控制过渡平滑度)

@@ -125,7 +125,9 @@ def main(cfg):
         cfg.trainer.save_freq = 500
         cfg.trainer.test_freq = 500
         cfg.trainer.total_epochs = 15
-        cfg.trainer.default_local_dir = os.path.expanduser("/mnt/disk1_from_server2/haofeiy2/opentinker_checkpoints")
+        cfg.trainer.default_local_dir = os.path.expanduser(
+            "/mnt/disk1_from_server2/haofeiy2/opentinker_checkpoints"
+        )
 
     # ---------------------------------------------------------
     # Agent Loop Configuration
@@ -142,7 +144,9 @@ def main(cfg):
 
         # Async engine requires V1, so force it. VLLM_DISABLE_SLEEP_MODE=1 handles cumem issues.
         os.environ["VLLM_USE_V1"] = "1"
-        logger.info(f"VLLM_USE_V1=1 for async rollout (sleep mode disabled to avoid cumem issues)")
+        logger.info(
+            "VLLM_USE_V1=1 for async rollout (sleep mode disabled to avoid cumem issues)"
+        )
 
         # Increase Ray's memory threshold to avoid premature OOM kills
         # Default is 0.95 (95%), we increase to 0.98 (98%)

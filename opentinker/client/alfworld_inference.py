@@ -115,7 +115,7 @@ def main(args):
         print(f"  Total episodes: {stats.get('total_games', 0)}")
         print(f"  Successes: {stats.get('total_wins', 0)}")
         print(f"  Failures: {stats.get('total_losses', 0)}")
-        success_rate = stats.get('cumulative_win_rate', 0)
+        success_rate = stats.get("cumulative_win_rate", 0)
         print(f"  Success rate: {success_rate:.1%}")
         print(f"  Mean reward: {stats.get('mean_final_reward', 0):.4f}")
         print(f"  Mean steps: {stats.get('mean_steps', 0):.2f}")

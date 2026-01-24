@@ -116,12 +116,12 @@ class GenericAgentData:
         self.response_ids: list[int] = []
         self.response_mask: list[int] = []
         self.response_logprobs: list[float] = []
-        
+
         # Observation mask for world model loss
         # observation_mask=1 for environment observation tokens (used for world model SFT loss)
         # observation_mask=0 for LLM-generated action tokens
         self.observation_mask: list[int] = []
-        
+
         # Turn index for each token (used for turn-wise dynamic entropy coefficient)
         # turn_ids[i] = which turn token i belongs to (0-indexed)
         # This allows computing per-turn WM uncertainty and applying different entropy weights
@@ -464,7 +464,9 @@ class GenericAgentLoop(AgentLoopBase):
         output.extra_fields["env_info"] = agent_data.extra_fields.get("env_info", [])
         output.extra_fields["turn_scores"] = agent_data.turn_scores
         # Add observation_mask for world model loss (marks environment feedback tokens)
-        output.extra_fields["observation_mask"] = agent_data.observation_mask[: self.response_length]
+        output.extra_fields["observation_mask"] = agent_data.observation_mask[
+            : self.response_length
+        ]
         # Add turn_ids for turn-wise dynamic entropy coefficient
         # turn_ids[i] = which turn token i belongs to (0-indexed)
         output.extra_fields["turn_ids"] = agent_data.turn_ids[: self.response_length]
@@ -547,7 +549,9 @@ class GenericAgentLoop(AgentLoopBase):
                     agent_data.prompt_ids.append(eos_token_id)
                     agent_data.response_mask.append(1)
                     agent_data.observation_mask.append(0)  # EOS is LLM-generated
-                    agent_data.turn_ids.append(agent_data.assistant_turns)  # Current turn
+                    agent_data.turn_ids.append(
+                        agent_data.assistant_turns
+                    )  # Current turn
             return GenericAgentState.TERMINATED
 
         # Current turn index (0-indexed, based on assistant turns)
@@ -597,7 +601,7 @@ class GenericAgentLoop(AgentLoopBase):
         agent_data.observation_mask += [0] * len(
             agent_data.response_ids
         )  # observation_mask=0 for LLM-generated actions
-        
+
         # Record turn ID for each token (used for turn-wise dynamic entropy coefficient)
         # current_turn was captured BEFORE incrementing assistant_turns
         agent_data.turn_ids += [current_turn] * len(agent_data.response_ids)

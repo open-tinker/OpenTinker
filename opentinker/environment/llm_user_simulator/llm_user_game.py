@@ -6,7 +6,7 @@ enabling training of conversational agents through self-play or cross-play.
 
 Example:
     from llm_user_game import LLMUserGame
-    
+
     game = LLMUserGame(
         simulator_model="gpt-4o-mini",
         task_prompt="You are a customer trying to book a flight.",
@@ -26,12 +26,14 @@ from opentinker.environment.base_game import AbstractGame, StepResult
 # Try to import LLM clients
 try:
     from openai import OpenAI
+
     OPENAI_AVAILABLE = True
 except ImportError:
     OPENAI_AVAILABLE = False
 
 try:
     import anthropic
+
     ANTHROPIC_AVAILABLE = True
 except ImportError:
     ANTHROPIC_AVAILABLE = False
@@ -40,32 +42,33 @@ except ImportError:
 @dataclass
 class ConversationTurn:
     """A single turn in the conversation."""
+
     role: str  # "agent" or "user"
     content: str
 
 
 class LLMUserGame(AbstractGame):
     """LLM-based user simulator environment.
-    
+
     The agent (being trained) plays the role of an assistant/agent,
     while an LLM simulates the user providing requests and feedback.
-    
+
     Attributes:
         simulator_model: Model name for the user simulator (e.g., "gpt-4o-mini")
         task_prompt: System prompt defining the user's persona and task
         max_turns: Maximum conversation turns before episode ends
         success_keywords: Keywords that indicate task success
     """
-    
+
     # Reward constants
     REWARD_SUCCESS = 10.0
     REWARD_FAILURE = -1.0
     REWARD_STEP = -0.01
     REWARD_USER_SATISFIED = 5.0
-    
+
     # Default max turns
     DEFAULT_MAX_TURNS = 10
-    
+
     # LLM Judge prompt
     JUDGE_PROMPT = """You are an expert evaluator assessing conversational AI quality.
 
@@ -97,7 +100,7 @@ Provide scores and a brief explanation in this exact JSON format:
 }
 ```
 """
-    
+
     # Default task prompts for various scenarios
     TASK_PROMPTS = {
         "customer_service": """You are a customer contacting customer service.
@@ -123,7 +126,7 @@ When you get satisfactory answers, say "That's exactly what I needed, thanks!"
 If answers are unclear or wrong, say "That's not what I was looking for."
 """,
     }
-    
+
     def __init__(
         self,
         simulator_model: str = "gpt-4o-mini",
@@ -140,7 +143,7 @@ If answers are unclear or wrong, say "That's not what I was looking for."
         judge_model: Optional[str] = None,
     ):
         """Initialize LLM User Simulator.
-        
+
         Args:
             simulator_model: Model name for user simulation
             simulator_api_key: API key (defaults to env var)
@@ -158,14 +161,14 @@ If answers are unclear or wrong, say "That's not what I was looking for."
         self.simulator_model = simulator_model
         self.max_turns = max_turns
         self.temperature = temperature
-        
+
         # Set API key
         self.api_key = simulator_api_key or os.environ.get("OPENAI_API_KEY")
         self.base_url = simulator_base_url
-        
+
         # Initialize LLM client
         self._init_llm_client()
-        
+
         # Set task prompt
         if task_prompt:
             self.task_prompt = task_prompt
@@ -173,54 +176,67 @@ If answers are unclear or wrong, say "That's not what I was looking for."
             self.task_prompt = self.TASK_PROMPTS.get(
                 task_type, self.TASK_PROMPTS["customer_service"]
             )
-        
+
         # LLM-as-a-Judge settings
         self.use_llm_judge = use_llm_judge
         self.judge_model = judge_model or simulator_model
-        
+
         # Success/failure detection (fallback when LLM judge is disabled)
         self.success_keywords = success_keywords or [
-            "thank you", "that resolves", "that fixed it", "exactly what I needed",
-            "booking is confirmed", "issue is resolved", "problem solved"
+            "thank you",
+            "that resolves",
+            "that fixed it",
+            "exactly what I needed",
+            "booking is confirmed",
+            "issue is resolved",
+            "problem solved",
         ]
         self.failure_keywords = failure_keywords or [
-            "not helpful", "goodbye", "doesn't work", "not what I was looking for",
-            "try elsewhere", "give up", "frustrated"
+            "not helpful",
+            "goodbye",
+            "doesn't work",
+            "not what I was looking for",
+            "try elsewhere",
+            "give up",
+            "frustrated",
         ]
-        
+
         # Judge evaluation result (populated at end of episode)
         self._judge_result: Optional[Dict[str, Any]] = None
-        
+
         # Game state
         self._conversation: List[ConversationTurn] = []
         self._turn_count = 0
         self._done = False
         self._success = False
         self._current_task = ""
-        
+
         if seed is not None:
             random.seed(seed)
-    
+
     def _init_llm_client(self):
         """Initialize the LLM client for user simulation."""
         if not OPENAI_AVAILABLE:
             raise ImportError(
                 "openai package not installed. Install with: pip install openai"
             )
-        
+
         client_kwargs = {"api_key": self.api_key}
         if self.base_url:
             client_kwargs["base_url"] = self.base_url
-        
+
         self._client = OpenAI(**client_kwargs)
-    
+
     def _generate_user_response(self, agent_message: str) -> str:
         """Generate user response using the simulator LLM."""
         # Build conversation history for the user LLM
         messages = [
-            {"role": "system", "content": self.task_prompt + "\n\n" + self._current_task}
+            {
+                "role": "system",
+                "content": self.task_prompt + "\n\n" + self._current_task,
+            }
         ]
-        
+
         # Add conversation history
         for turn in self._conversation:
             if turn.role == "agent":
@@ -229,10 +245,10 @@ If answers are unclear or wrong, say "That's not what I was looking for."
             else:
                 # User's own previous messages
                 messages.append({"role": "assistant", "content": turn.content})
-        
+
         # Add the latest agent message
         messages.append({"role": "user", "content": agent_message})
-        
+
         # Generate user response
         response = self._client.chat.completions.create(
             model=self.simulator_model,
@@ -240,51 +256,57 @@ If answers are unclear or wrong, say "That's not what I was looking for."
             temperature=self.temperature,
             max_tokens=500,
         )
-        
+
         return response.choices[0].message.content
-    
+
     def _generate_initial_user_message(self) -> str:
         """Generate the initial user message to start conversation."""
         messages = [
-            {"role": "system", "content": self.task_prompt + "\n\n" + self._current_task},
-            {"role": "user", "content": "Start the conversation by stating your request or problem."}
+            {
+                "role": "system",
+                "content": self.task_prompt + "\n\n" + self._current_task,
+            },
+            {
+                "role": "user",
+                "content": "Start the conversation by stating your request or problem.",
+            },
         ]
-        
+
         response = self._client.chat.completions.create(
             model=self.simulator_model,
             messages=messages,
             temperature=self.temperature,
             max_tokens=300,
         )
-        
+
         return response.choices[0].message.content
-    
+
     def _check_success(self, text: str) -> bool:
         """Check if conversation indicates success."""
         text_lower = text.lower()
         return any(kw.lower() in text_lower for kw in self.success_keywords)
-    
+
     def _check_failure(self, text: str) -> bool:
         """Check if conversation indicates failure."""
         text_lower = text.lower()
         return any(kw.lower() in text_lower for kw in self.failure_keywords)
-    
+
     def _evaluate_with_llm_judge(self) -> Dict[str, Any]:
         """Evaluate the conversation using LLM-as-a-Judge.
-        
+
         Returns:
             Dictionary with scores and evaluation details.
         """
         import json
-        
+
         # Format conversation for judge
         conv_text = ""
         for turn in self._conversation:
             role_label = "Assistant" if turn.role == "agent" else "User"
             conv_text += f"{role_label}: {turn.content}\n\n"
-        
+
         prompt = self.JUDGE_PROMPT.format(conversation=conv_text)
-        
+
         try:
             response = self._client.chat.completions.create(
                 model=self.judge_model,
@@ -292,24 +314,31 @@ If answers are unclear or wrong, say "That's not what I was looking for."
                 temperature=0.1,  # Low temperature for consistent evaluation
                 max_tokens=500,
             )
-            
+
             result_text = response.choices[0].message.content
-            
+
             # Extract JSON from response
-            json_match = re.search(r'```json\s*(.*?)\s*```', result_text, re.DOTALL)
+            json_match = re.search(r"```json\s*(.*?)\s*```", result_text, re.DOTALL)
             if json_match:
                 result = json.loads(json_match.group(1))
             else:
                 # Try to parse the whole response as JSON
                 result = json.loads(result_text)
-            
+
             # Validate and normalize scores
-            for key in ["helpfulness", "clarity", "problem_resolution", "professionalism", "efficiency", "overall_score"]:
+            for key in [
+                "helpfulness",
+                "clarity",
+                "problem_resolution",
+                "professionalism",
+                "efficiency",
+                "overall_score",
+            ]:
                 if key in result:
                     result[key] = max(1, min(10, int(result[key])))
-            
+
             return result
-            
+
         except Exception as e:
             # Fallback to keyword-based evaluation
             print(f"[LLM Judge] Evaluation failed: {e}, using fallback")
@@ -325,15 +354,15 @@ If answers are unclear or wrong, say "That's not what I was looking for."
                 "success": success,
                 "explanation": "Fallback evaluation (LLM judge failed)",
             }
-    
+
     def _calculate_reward_from_judge(self, judge_result: Dict[str, Any]) -> float:
         """Calculate reward from LLM judge evaluation.
-        
+
         Maps the overall_score (1-10) to reward range.
         """
         overall = judge_result.get("overall_score", 5)
         success = judge_result.get("success", False)
-        
+
         if success:
             # Success: reward based on quality (5-10 range)
             # Map overall_score 1-10 to reward 5-10
@@ -342,46 +371,45 @@ If answers are unclear or wrong, say "That's not what I was looking for."
             # Failure: negative reward based on how bad
             # Map overall_score 1-10 to reward -5 to 0
             return (overall / 10.0) * 5.0 - 5.0
-    
+
     def reset(
-        self,
-        task_prompt: Optional[str] = None,
-        seed: Optional[int] = None,
-        **kwargs
+        self, task_prompt: Optional[str] = None, seed: Optional[int] = None, **kwargs
     ) -> str:
         """Reset the game to start a new conversation.
-        
+
         Args:
             task_prompt: Override task prompt for this episode
             seed: Random seed
             **kwargs: Additional arguments
-            
+
         Returns:
             Initial observation (user's first message)
         """
         if seed is not None:
             random.seed(seed)
-        
+
         # Update task prompt if provided
         if task_prompt:
             self._current_task = task_prompt
         else:
             # Generate a random specific task
             self._current_task = self._generate_random_task()
-        
+
         # Reset state
         self._conversation = []
         self._turn_count = 0
         self._done = False
         self._success = False
         self._judge_result = None
-        
+
         # Generate initial user message
         initial_message = self._generate_initial_user_message()
-        self._conversation.append(ConversationTurn(role="user", content=initial_message))
-        
+        self._conversation.append(
+            ConversationTurn(role="user", content=initial_message)
+        )
+
         return self._format_observation(initial_message)
-    
+
     def _generate_random_task(self) -> str:
         """Generate a random specific task for variety."""
         tasks = [
@@ -395,19 +423,19 @@ If answers are unclear or wrong, say "That's not what I was looking for."
             "You want to cancel your order.",
         ]
         return random.choice(tasks)
-    
+
     def _format_observation(self, message: str) -> str:
         """Format observation for the agent."""
         obs = f"=== User Message ===\n{message}\n"
         obs += f"\n=== Conversation Turn: {self._turn_count + 1}/{self.max_turns} ==="
         return obs
-    
+
     def step(self, action: str) -> StepResult:
         """Execute agent action and get user response.
-        
+
         Args:
             action: Agent's response to the user
-            
+
         Returns:
             StepResult with user's response, reward, done flag, and info
         """
@@ -418,23 +446,23 @@ If answers are unclear or wrong, say "That's not what I was looking for."
                 done=True,
                 info={"error": "conversation_ended"},
             )
-        
+
         self._turn_count += 1
-        
+
         # Parse agent's action
         parsed_action = self._parse_action(action)
-        
+
         # Add agent message to conversation
         self._conversation.append(ConversationTurn(role="agent", content=parsed_action))
-        
+
         # Generate user response
         user_response = self._generate_user_response(parsed_action)
         self._conversation.append(ConversationTurn(role="user", content=user_response))
-        
+
         # Check for episode end conditions
         episode_ended = False
         end_reason = ""
-        
+
         if self._check_success(user_response):
             episode_ended = True
             end_reason = "success_keyword"
@@ -444,17 +472,17 @@ If answers are unclear or wrong, say "That's not what I was looking for."
         elif self._turn_count >= self.max_turns:
             episode_ended = True
             end_reason = "timeout"
-        
+
         # Calculate reward
         if episode_ended:
             self._done = True
-            
+
             if self.use_llm_judge:
                 # Use LLM-as-a-Judge for evaluation
                 self._judge_result = self._evaluate_with_llm_judge()
                 reward = self._calculate_reward_from_judge(self._judge_result)
                 self._success = self._judge_result.get("success", False)
-                
+
                 # Add evaluation summary to response
                 judge_summary = (
                     f"\n\n=== LLM Judge Evaluation ===\n"
@@ -471,7 +499,7 @@ If answers are unclear or wrong, say "That's not what I was looking for."
                 else:
                     self._success = False
                     reward = self.REWARD_FAILURE
-            
+
             # Add end reason prefix
             if end_reason == "timeout":
                 user_response = f"TIMEOUT: Maximum turns reached.\n\n{user_response}"
@@ -481,7 +509,7 @@ If answers are unclear or wrong, say "That's not what I was looking for."
                 user_response = f"FAILURE: {user_response}"
         else:
             reward = self.REWARD_STEP
-        
+
         # Build info dict
         info = {
             "turn": self._turn_count,
@@ -489,18 +517,18 @@ If answers are unclear or wrong, say "That's not what I was looking for."
             "agent_message": parsed_action,
             "user_message": user_response,
         }
-        
+
         # Add judge evaluation if available
         if self._judge_result:
             info["judge_evaluation"] = self._judge_result
-        
+
         return StepResult(
             observation=self._format_observation(user_response),
             reward=reward,
             done=self._done,
             info=info,
         )
-    
+
     def _parse_action(self, raw_action: str) -> str:
         """Parse action from LLM output."""
         # Try to extract from <response> tags
@@ -509,10 +537,10 @@ If answers are unclear or wrong, say "That's not what I was looking for."
         )
         if match:
             return match.group(1).strip()
-        
+
         # Otherwise use the whole output
         return raw_action.strip()
-    
+
     def get_system_prompt(self) -> str:
         """Return the system prompt for the agent."""
         return (
@@ -526,11 +554,11 @@ If answers are unclear or wrong, say "That's not what I was looking for."
             "<response>I understand you're having trouble with your order. "
             "Could you please provide your order number so I can look into this?</response>"
         )
-    
+
     def get_initial_user_message(self) -> str:
         """Return context for the agent."""
         return "You are helping a user. Respond to their message."
-    
+
     def get_state(self) -> Dict[str, Any]:
         """Return current game state."""
         state = {
@@ -544,20 +572,19 @@ If answers are unclear or wrong, say "That's not what I was looking for."
         if self._judge_result:
             state["judge_evaluation"] = self._judge_result
         return state
-    
+
     def generate_initial_state(self) -> Dict[str, Any]:
         """Generate random initial state for training."""
         return {
             "seed": random.randint(0, 1000000),
         }
-    
+
     def get_user_message_with_state(self, **kwargs) -> str:
         """Generate user message with state for prompt."""
         self.reset(**kwargs)
         initial_obs = self._format_observation(self._conversation[0].content)
         return f"{initial_obs}\n\nRespond to the user."
-    
+
     def get_interaction_name(self) -> str:
         """Return interaction name."""
         return "llm_user_simulator"
-

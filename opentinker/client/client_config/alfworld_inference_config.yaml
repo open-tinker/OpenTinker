@@ -2,35 +2,35 @@
 # Use with: python alfworld_inference.py
 
 # Model settings
-model_path: null  # Path to trained checkpoint (HuggingFace format) - REQUIRED
-tokenizer_path: null  # Tokenizer path (defaults to model_path if null)
+model_path: null # Path to trained checkpoint (HuggingFace format) - REQUIRED
+tokenizer_path: null # Tokenizer path (defaults to model_path if null)
 
 # GPU settings
-tensor_parallel_size: 1  # Number of GPUs for tensor parallelism
-num_gpus: 1  # Number of GPUs to request from scheduler
+tensor_parallel_size: 1 # Number of GPUs for tensor parallelism
+num_gpus: 1 # Number of GPUs to request from scheduler
 gpu_memory_utilization: 0.9
-max_model_len: null  # Max model context length (null = auto)
+max_model_len: null # Max model context length (null = auto)
 trust_remote_code: true
 
 # Generation parameters (greedy by default for inference)
-temperature: 0.0  # 0.0 = greedy decoding for deterministic evaluation
+temperature: 0.0 # 0.0 = greedy decoding for deterministic evaluation
 top_p: 1.0
-max_new_tokens: 4096  # Max tokens for full multi-turn trajectory
+max_new_tokens: 4096 # Max tokens for full multi-turn trajectory
 
 # Data settings
-data_path: null  # Input data file (parquet/jsonl), null = use ALFWorld split
-output_path: null  # Output results file (jsonl)
-max_samples: null  # Limit samples (null = all)
+data_path: null # Input data file (parquet/jsonl), null = use ALFWorld split
+output_path: null # Output results file (jsonl)
+max_samples: null # Limit samples (null = all)
 
 # Environment settings
 env_endpoint: http://0.0.0.0:8091
-split: eval_in_distribution  # train, eval_in_distribution, eval_out_of_distribution
+split: eval_in_distribution # train, eval_in_distribution, eval_out_of_distribution
 
 # Multi-turn settings for ALFWorld
 multi_turn:
-  max_user_turns: 50  # Max environment interactions
+  max_user_turns: 50 # Max environment interactions
   max_assistant_turns: 50
-  max_tokens_per_turn: 256  # Per-turn response limit
+  max_tokens_per_turn: 256 # Per-turn response limit
 
 # Scheduler settings
 scheduler_url: http://0.0.0.0:8089

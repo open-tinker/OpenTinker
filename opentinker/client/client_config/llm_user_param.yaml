@@ -55,4 +55,3 @@ scheduler_api_key: null
 
 # GPU settings
 num_gpus: 4
-
