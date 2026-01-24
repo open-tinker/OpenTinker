@@ -1220,78 +1220,74 @@ class RayPPOTrainer:
         self, batch: DataProto, wm_config: dict
     ) -> tuple[DataProto, dict]:
         """Compute per-token entropy coefficient based on WM uncertainty.
-
+        
         This computes beta_token at the trainer level (not actor level) to ensure:
         1. Stable weights across PPO epochs (using lagged θ^- from old_log_probs)
         2. Proper coordination with observation_mask and turn_ids
-
+        
         Formula:
             For each turn t:
                 u_t = mean(-log_prob on obs tokens of turn t)  # WM uncertainty
                 z_t = (u_t - mean(u)) / std(u)                 # z-score
                 β_t = β_0 + β_1 * sigmoid(γ * z_t)             # dynamic entropy coeff
-
+            
             beta_token[action_tokens_of_turn_t] = β_t
-
+        
         Args:
             batch: DataProto with old_log_probs, observation_mask, turn_ids, response_mask
             wm_config: WM dynamic entropy configuration dict
-
+            
         Returns:
             Updated batch with beta_token field, and metrics dict
         """
         import torch
         import numpy as np
-
+        
         metrics = {}
-
-        # Get config
+        
+        # Get config - handle both dict and config object access patterns
         base_entropy_coeff = self.config.actor_rollout_ref.actor.entropy_coeff
-        beta_0 = wm_config.get("beta_0", base_entropy_coeff)
-        beta_1 = wm_config.get("beta_1", base_entropy_coeff)
-        gamma = wm_config.get("gamma", 1.0)
-
+        
+        # Helper function to get value from config (dict or object)
+        def get_config_value(cfg, key, default):
+            if isinstance(cfg, dict):
+                return cfg.get(key, default)
+            elif hasattr(cfg, key):
+                return getattr(cfg, key, default)
+            elif hasattr(cfg, 'get'):
+                return cfg.get(key, default)
+            return default
+        
+        beta_0 = get_config_value(wm_config, "beta_0", base_entropy_coeff)
+        beta_1 = get_config_value(wm_config, "beta_1", base_entropy_coeff)
+        gamma = get_config_value(wm_config, "gamma", 1.0)
+        
         # Get data from batch
         old_log_probs = batch.batch["old_log_probs"]  # (B, L) - lagged policy log_probs
         response_mask = batch.batch["response_mask"]  # (B, L)
         batch_size, response_length = response_mask.shape
         device = response_mask.device
-
+        
         # Get observation_mask and turn_ids from non_tensor_batch
         observation_mask_raw = batch.non_tensor_batch.get("observation_mask", None)
         turn_ids_raw = batch.non_tensor_batch.get("turn_ids", None)
-
+        
         # DEBUG: Print available keys in non_tensor_batch
-        print(
-            f"[WM Dynamic Entropy] DEBUG: non_tensor_batch keys = {list(batch.non_tensor_batch.keys())}"
-        )
-        print(
-            f"[WM Dynamic Entropy] DEBUG: observation_mask_raw is None = {observation_mask_raw is None}"
-        )
-        print(
-            f"[WM Dynamic Entropy] DEBUG: turn_ids_raw is None = {turn_ids_raw is None}"
-        )
-
+        print(f"[WM Dynamic Entropy] DEBUG: non_tensor_batch keys = {list(batch.non_tensor_batch.keys())}")
+        print(f"[WM Dynamic Entropy] DEBUG: observation_mask_raw is None = {observation_mask_raw is None}")
+        print(f"[WM Dynamic Entropy] DEBUG: turn_ids_raw is None = {turn_ids_raw is None}")
+        
         if observation_mask_raw is None or turn_ids_raw is None:
-            print(
-                "[WM Dynamic Entropy] WARNING: observation_mask or turn_ids not found, using default entropy_coeff"
-            )
+            print("[WM Dynamic Entropy] WARNING: observation_mask or turn_ids not found, using default entropy_coeff")
             # Create uniform beta_token
-            beta_token = (
-                torch.ones(batch_size, response_length, device=device)
-                * base_entropy_coeff
-            )
+            beta_token = torch.ones(batch_size, response_length, device=device) * base_entropy_coeff
             batch.batch["beta_token"] = beta_token
             return batch, metrics
-
+        
         # Build tensors from raw data
-        obs_mask_tensor = torch.zeros(
-            batch_size, response_length, device=device, dtype=torch.bool
-        )
-        turn_ids_tensor = torch.zeros(
-            batch_size, response_length, device=device, dtype=torch.long
-        )
-
+        obs_mask_tensor = torch.zeros(batch_size, response_length, device=device, dtype=torch.bool)
+        turn_ids_tensor = torch.zeros(batch_size, response_length, device=device, dtype=torch.long)
+        
         for b in range(batch_size):
             # observation_mask
             obs_mask = observation_mask_raw[b]
@@ -1299,71 +1295,43 @@ class RayPPOTrainer:
                 # Verify format: should be 0/1 vector, not index list
                 obs_arr = np.array(obs_mask[:response_length])
                 if len(obs_arr) > 0 and obs_arr.max() > 1:
-                    print(
-                        f"[WM Dynamic Entropy] WARNING: observation_mask looks like index list (max={obs_arr.max()}), skipping sample {b}"
-                    )
+                    print(f"[WM Dynamic Entropy] WARNING: observation_mask looks like index list (max={obs_arr.max()}), skipping sample {b}")
                     continue
                 mask_tensor = torch.tensor(obs_arr, device=device, dtype=torch.float32)
                 if len(mask_tensor) < response_length:
-                    mask_tensor = torch.cat(
-                        [
-                            mask_tensor,
-                            torch.zeros(
-                                response_length - len(mask_tensor), device=device
-                            ),
-                        ]
-                    )
+                    mask_tensor = torch.cat([mask_tensor, torch.zeros(response_length - len(mask_tensor), device=device)])
                 obs_mask_tensor[b] = mask_tensor.bool()
-
+            
             # turn_ids
             t_ids = turn_ids_raw[b]
             if t_ids is not None and len(t_ids) > 0:
-                ids_tensor = torch.tensor(
-                    t_ids[:response_length], device=device, dtype=torch.long
-                )
+                ids_tensor = torch.tensor(t_ids[:response_length], device=device, dtype=torch.long)
                 if len(ids_tensor) < response_length:
-                    ids_tensor = torch.cat(
-                        [
-                            ids_tensor,
-                            torch.zeros(
-                                response_length - len(ids_tensor),
-                                device=device,
-                                dtype=torch.long,
-                            ),
-                        ]
-                    )
+                    ids_tensor = torch.cat([ids_tensor, torch.zeros(response_length - len(ids_tensor), device=device, dtype=torch.long)])
                 turn_ids_tensor[b] = ids_tensor
-
+        
         # Initialize beta_token with base entropy coeff
-        beta_token = (
-            torch.ones(batch_size, response_length, device=device) * base_entropy_coeff
-        )
-
+        beta_token = torch.ones(batch_size, response_length, device=device) * base_entropy_coeff
+        
         # DEBUG: Print sample info
         if observation_mask_raw is not None and len(observation_mask_raw) > 0:
-            print(
-                f"[WM Dynamic Entropy] DEBUG: First sample observation_mask length = {len(observation_mask_raw[0]) if observation_mask_raw[0] is not None else 'None'}"
-            )
-            print(
-                f"[WM Dynamic Entropy] DEBUG: First sample turn_ids length = {len(turn_ids_raw[0]) if turn_ids_raw[0] is not None else 'None'}"
-            )
-
+            print(f"[WM Dynamic Entropy] DEBUG: First sample observation_mask length = {len(observation_mask_raw[0]) if observation_mask_raw[0] is not None else 'None'}")
+            print(f"[WM Dynamic Entropy] DEBUG: First sample turn_ids length = {len(turn_ids_raw[0]) if turn_ids_raw[0] is not None else 'None'}")
+        
         # Track statistics
         all_uncertainties = []
         all_betas = []
         valid_samples = 0
-
+        
         for b in range(batch_size):
             sample_obs_mask = obs_mask_tensor[b]
             sample_turn_ids = turn_ids_tensor[b]
             sample_log_prob = old_log_probs[b]
-
+            
             # Compute per-turn WM uncertainty
-            max_turns = (
-                sample_turn_ids.max().item() + 1 if sample_turn_ids.numel() > 0 else 1
-            )
+            max_turns = sample_turn_ids.max().item() + 1 if sample_turn_ids.numel() > 0 else 1
             turn_uncertainties = []
-
+            
             for t in range(max_turns):
                 # Find observation tokens for this turn
                 turn_obs_mask = (sample_turn_ids == t) & sample_obs_mask
@@ -1378,68 +1346,52 @@ class RayPPOTrainer:
                         uncertainty = -valid_log_probs.mean().item()
                         turn_uncertainties.append((t, uncertainty))
                         all_uncertainties.append(uncertainty)
-
+            
             if len(turn_uncertainties) > 1:
                 valid_samples += 1
                 # Z-score normalize uncertainties within this sample
-                uncertainties = torch.tensor(
-                    [u for _, u in turn_uncertainties], device=device
-                )
+                uncertainties = torch.tensor([u for _, u in turn_uncertainties], device=device)
                 u_mean = uncertainties.mean()
                 u_std = uncertainties.std()
-
+                
                 for t, u in turn_uncertainties:
                     if u_std > 1e-6:
                         z = (u - u_mean) / u_std
                     else:
                         z = 0.0
-
+                    
                     # β_t = β_0 + β_1 * sigmoid(γ * z)
-                    beta_t = (
-                        beta_0
-                        + beta_1
-                        * torch.sigmoid(torch.tensor(gamma * z, device=device)).item()
-                    )
+                    beta_t = beta_0 + beta_1 * torch.sigmoid(torch.tensor(gamma * z, device=device)).item()
                     all_betas.append(beta_t)
-
+                    
                     # Apply to action tokens of this turn (not obs tokens)
-                    turn_action_mask = (
-                        (sample_turn_ids == t)
-                        & (~sample_obs_mask)
-                        & response_mask[b].bool()
-                    )
+                    turn_action_mask = (sample_turn_ids == t) & (~sample_obs_mask) & response_mask[b].bool()
                     beta_token[b, turn_action_mask] = beta_t
             elif len(turn_uncertainties) == 1:
                 # Only one turn with uncertainty, use base entropy coeff (default)
                 pass
-
+        
         # Add beta_token to batch
         batch.batch["beta_token"] = beta_token
-
+        
         # Compute metrics
         if all_uncertainties:
             metrics["wm_entropy/uncertainty_mean"] = np.mean(all_uncertainties)
-            metrics["wm_entropy/uncertainty_std"] = (
-                np.std(all_uncertainties) if len(all_uncertainties) > 1 else 0.0
-            )
+            metrics["wm_entropy/uncertainty_std"] = np.std(all_uncertainties) if len(all_uncertainties) > 1 else 0.0
         if all_betas:
             metrics["wm_entropy/beta_mean"] = np.mean(all_betas)
-            metrics["wm_entropy/beta_std"] = (
-                np.std(all_betas) if len(all_betas) > 1 else 0.0
-            )
+            metrics["wm_entropy/beta_std"] = np.std(all_betas) if len(all_betas) > 1 else 0.0
             metrics["wm_entropy/beta_min"] = np.min(all_betas)
             metrics["wm_entropy/beta_max"] = np.max(all_betas)
         metrics["wm_entropy/valid_samples"] = valid_samples
         metrics["wm_entropy/total_samples"] = batch_size
-
+        
         # Log overall beta_token stats
         action_mask = response_mask.bool() & (~obs_mask_tensor)
         if action_mask.sum() > 0:
-            metrics["wm_entropy/beta_token_mean"] = (
-                beta_token[action_mask].mean().item()
-            )
+            metrics["wm_entropy/beta_token_mean"] = beta_token[action_mask].mean().item()
             metrics["wm_entropy/beta_token_std"] = beta_token[action_mask].std().item()
-
+        
         return batch, metrics
 
     def compute_rollout_importance_weights_and_add_to_batch(
@@ -1843,20 +1795,38 @@ class RayPPOTrainer:
                             norm_adv_by_std_in_grpo=norm_adv_by_std_in_grpo,
                             config=self.config.algorithm,
                         )
-
+                        
                         # =====================================================================
                         # WM-Guided Dynamic Entropy: Compute beta_token at trainer level
                         # This ensures stable weights across PPO epochs (using lagged θ^-)
                         # =====================================================================
-                        wm_dynamic_entropy_config = (
-                            self.config.actor_rollout_ref.actor.get(
-                                "wm_dynamic_entropy", {}
-                            )
-                        )
-                        if wm_dynamic_entropy_config.get("enabled", False):
-                            with marked_timer(
-                                "wm_beta_token", timing_raw, color="magenta"
-                            ):
+                        actor_config = self.config.actor_rollout_ref.actor
+                        # Handle both dict and dataclass/OmegaConf access patterns
+                        if hasattr(actor_config, 'get'):
+                            wm_dynamic_entropy_config = actor_config.get("wm_dynamic_entropy", {})
+                        elif hasattr(actor_config, 'wm_dynamic_entropy'):
+                            wm_dynamic_entropy_config = actor_config.wm_dynamic_entropy
+                            # Convert to dict if it's a config object
+                            if hasattr(wm_dynamic_entropy_config, '__dict__'):
+                                wm_dynamic_entropy_config = dict(wm_dynamic_entropy_config)
+                            elif hasattr(wm_dynamic_entropy_config, 'items'):
+                                wm_dynamic_entropy_config = dict(wm_dynamic_entropy_config)
+                        else:
+                            wm_dynamic_entropy_config = {}
+                        
+                        # Check if enabled
+                        is_enabled = False
+                        if isinstance(wm_dynamic_entropy_config, dict):
+                            is_enabled = wm_dynamic_entropy_config.get("enabled", False)
+                        elif hasattr(wm_dynamic_entropy_config, 'enabled'):
+                            is_enabled = wm_dynamic_entropy_config.enabled
+                        elif hasattr(wm_dynamic_entropy_config, 'get'):
+                            is_enabled = wm_dynamic_entropy_config.get("enabled", False)
+                        
+                        print(f"[WM Dynamic Entropy] DEBUG: is_enabled = {is_enabled}, config type = {type(wm_dynamic_entropy_config)}")
+                        
+                        if is_enabled:
+                            with marked_timer("wm_beta_token", timing_raw, color="magenta"):
                                 batch, wm_metrics = self._compute_wm_beta_token(
                                     batch, wm_dynamic_entropy_config
                                 )
