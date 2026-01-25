@@ -8,8 +8,8 @@ experiment_name: alfworld_training
 # Logging
 logger_backends: ["console", "wandb"]
 
-# Tracing (optional)
-enable_tracing: true
+# Tracing (optional) - DISABLED to prevent disk space issues
+enable_tracing: false
 weave_project: null
 
 # WandB (optional)
@@ -87,15 +87,21 @@ actor:
   # World model loss: predict environment observations as auxiliary task
   # 训练模型预测环境观察，提供 WM 不确定性信号
   use_world_model_loss: true
-  world_model_loss_coef: 0.005 # 用小系数避免干扰 policy
+  world_model_loss_coef: 0.01 # 用小系数避免干扰 policy
+  
 
   # Turn-wise Dynamic Entropy Coefficient (WM-guided)
   # 根据每个 turn 的 WM uncertainty 调整 entropy bonus
-  # 高 uncertainty turn -> 高 β -> 更多探索
-  # 低 uncertainty turn -> 低 β -> 更稳定执行
+  # 高 uncertainty turn -> β > per_turn_budget -> 更多探索
+  # 低 uncertainty turn -> β < per_turn_budget -> 更稳定执行
   wm_dynamic_entropy:
     enabled: true
-    # β_t = β_0 + β_1 * sigmoid(γ * z_t), where z_t is z-score of uncertainty
-    beta_0: 0.001 # 基础熵系数 (WM 确定时用这个)
-    beta_1: 0.01 # 熵系数 scale (WM 不确定时增加这么多)
-    gamma: 1.0 # sigmoid 陡度 (控制过渡平滑度)
+    # Per-turn budget design:
+    # β_t = per_turn_budget * (1 + fluctuation * tanh(γ * (u - baseline) / baseline))
+    # - per_turn_budget: 每个 turn 的基础 entropy budget
+    # - baseline: 动态计算 = 该 sample 内所有 turn 的 uncertainty 均值
+    # - fluctuation: 浮动范围 (0.5 = ±50%)
+    # - gamma: 敏感度 (越大对 uncertainty 差异越敏感)
+    per_turn_budget: 0.002  # 每个 turn 的基础 budget
+    fluctuation: 0.5        # ±50% 浮动 (beta 范围: [0.001, 0.003])
+    gamma: 1.0              # 敏感度

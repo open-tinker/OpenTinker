@@ -1258,9 +1258,23 @@ class RayPPOTrainer:
                 return cfg.get(key, default)
             return default
 
-        beta_0 = get_config_value(wm_config, "beta_0", base_entropy_coeff)
-        beta_1 = get_config_value(wm_config, "beta_1", base_entropy_coeff)
-        gamma = get_config_value(wm_config, "gamma", 1.0)
+        # New per-turn budget design:
+        # beta_t = per_turn_budget * (1 + fluctuation * tanh(gamma * (u - baseline) / baseline))
+        # This gives each turn a base budget, adjusted up/down by WM uncertainty
+        per_turn_budget = get_config_value(wm_config, "per_turn_budget", 0.002)
+        baseline = get_config_value(wm_config, "baseline", 2.0)  # Expected "normal" uncertainty
+        gamma = get_config_value(wm_config, "gamma", 1.0)  # Sensitivity
+        fluctuation = get_config_value(wm_config, "fluctuation", 0.5)  # ±50% range
+        
+        # Legacy config support (fallback to old beta_0/beta_1 if per_turn_budget not set)
+        beta_0 = get_config_value(wm_config, "beta_0", None)
+        beta_1 = get_config_value(wm_config, "beta_1", None)
+        use_legacy_mode = beta_0 is not None and beta_1 is not None and per_turn_budget == 0.002
+        
+        if beta_0 is None:
+            beta_0 = base_entropy_coeff
+        if beta_1 is None:
+            beta_1 = base_entropy_coeff
 
         # Get data from batch
         old_log_probs = batch.batch["old_log_probs"]  # (B, L) - lagged policy log_probs
@@ -1285,14 +1299,16 @@ class RayPPOTrainer:
 
         if observation_mask_raw is None or turn_ids_raw is None:
             print(
-                "[WM Dynamic Entropy] WARNING: observation_mask or turn_ids not found, using default entropy_coeff"
+                "[WM Dynamic Entropy] WARNING: observation_mask or turn_ids not found, using per_turn_budget as neutral"
             )
-            # Create uniform beta_token
+            # Create uniform beta_token with per_turn_budget (neutral value)
             beta_token = (
                 torch.ones(batch_size, response_length, device=device)
-                * base_entropy_coeff
+                * per_turn_budget
             )
             batch.batch["beta_token"] = beta_token
+            metrics["wm_entropy/beta_token_mean"] = per_turn_budget
+            metrics["wm_entropy/per_turn_budget"] = per_turn_budget
             return batch, metrics
 
         # Build tensors from raw data
@@ -1345,9 +1361,12 @@ class RayPPOTrainer:
                     )
                 turn_ids_tensor[b] = ids_tensor
 
-        # Initialize beta_token with base entropy coeff
+        # Initialize beta_token with per_turn_budget (neutral value)
+        # This is used for tokens in turns that have no obs (e.g., first turn)
+        # where we can't compute WM uncertainty
+        default_beta = per_turn_budget  # Use per_turn_budget as neutral
         beta_token = (
-            torch.ones(batch_size, response_length, device=device) * base_entropy_coeff
+            torch.ones(batch_size, response_length, device=device) * default_beta
         )
 
         # DEBUG: Print sample info
@@ -1390,27 +1409,33 @@ class RayPPOTrainer:
                         turn_uncertainties.append((t, uncertainty))
                         all_uncertainties.append(uncertainty)
 
-            if len(turn_uncertainties) > 1:
+            if len(turn_uncertainties) >= 1:
                 valid_samples += 1
-                # Z-score normalize uncertainties within this sample
-                uncertainties = torch.tensor(
-                    [u for _, u in turn_uncertainties], device=device
-                )
-                u_mean = uncertainties.mean()
-                u_std = uncertainties.std()
-
+                
+                # Compute DYNAMIC baseline = mean of all turn uncertainties in this sample
+                sample_uncertainties = [u for _, u in turn_uncertainties]
+                sample_baseline = np.mean(sample_uncertainties)
+                
                 for t, u in turn_uncertainties:
-                    if u_std > 1e-6:
-                        z = (u - u_mean) / u_std
+                    # Per-turn budget with dynamic baseline adjustment
+                    # beta_t = per_turn_budget * (1 + fluctuation * tanh(gamma * (u - sample_baseline) / sample_baseline))
+                    # 
+                    # When u = sample_baseline: multiplier = 1, beta_t = per_turn_budget
+                    # When u > sample_baseline: multiplier > 1, beta_t > per_turn_budget (more exploration)
+                    # When u < sample_baseline: multiplier < 1, beta_t < per_turn_budget (less exploration)
+                    
+                    if sample_baseline > 1e-6:
+                        normalized_diff = (u - sample_baseline) / sample_baseline
                     else:
-                        z = 0.0
-
-                    # β_t = β_0 + β_1 * sigmoid(γ * z)
-                    beta_t = (
-                        beta_0
-                        + beta_1
-                        * torch.sigmoid(torch.tensor(gamma * z, device=device)).item()
-                    )
+                        normalized_diff = 0.0
+                    
+                    # Use tanh to smoothly bound the multiplier to [1-fluctuation, 1+fluctuation]
+                    multiplier = 1.0 + fluctuation * np.tanh(gamma * normalized_diff)
+                    beta_t = per_turn_budget * multiplier
+                    
+                    # Ensure beta_t is non-negative
+                    beta_t = max(0.0, beta_t)
+                    
                     all_betas.append(beta_t)
 
                     # Apply to action tokens of this turn (not obs tokens)
@@ -1420,19 +1445,23 @@ class RayPPOTrainer:
                         & response_mask[b].bool()
                     )
                     beta_token[b, turn_action_mask] = beta_t
-            elif len(turn_uncertainties) == 1:
-                # Only one turn with uncertainty, use base entropy coeff (default)
-                pass
 
         # Add beta_token to batch
         batch.batch["beta_token"] = beta_token
 
         # Compute metrics
+        metrics["wm_entropy/per_turn_budget"] = per_turn_budget
+        metrics["wm_entropy/fluctuation"] = fluctuation
+        
         if all_uncertainties:
-            metrics["wm_entropy/uncertainty_mean"] = np.mean(all_uncertainties)
+            # uncertainty_mean is the dynamic baseline (average across all turns in batch)
+            batch_mean_uncertainty = np.mean(all_uncertainties)
+            metrics["wm_entropy/uncertainty_mean"] = batch_mean_uncertainty
             metrics["wm_entropy/uncertainty_std"] = (
                 np.std(all_uncertainties) if len(all_uncertainties) > 1 else 0.0
             )
+            metrics["wm_entropy/uncertainty_min"] = np.min(all_uncertainties)
+            metrics["wm_entropy/uncertainty_max"] = np.max(all_uncertainties)
         if all_betas:
             metrics["wm_entropy/beta_mean"] = np.mean(all_betas)
             metrics["wm_entropy/beta_std"] = (
@@ -1440,6 +1469,8 @@ class RayPPOTrainer:
             )
             metrics["wm_entropy/beta_min"] = np.min(all_betas)
             metrics["wm_entropy/beta_max"] = np.max(all_betas)
+            # Beta relative to per_turn_budget
+            metrics["wm_entropy/beta_mean_ratio"] = np.mean(all_betas) / per_turn_budget if per_turn_budget > 0 else 1.0
         metrics["wm_entropy/valid_samples"] = valid_samples
         metrics["wm_entropy/total_samples"] = batch_size
 

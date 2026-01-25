@@ -6,13 +6,18 @@ export CUDA_HOME=$HOME/local/cuda-12.8
 export PATH=$CUDA_HOME/bin:$PATH
 export LD_LIBRARY_PATH=$CUDA_HOME/lib64:$LD_LIBRARY_PATH
 
-export ROLLOUT_TRACE_DIR="/home/haofeiy2/OpenTinker/traces"
+# DISABLED - causes disk space issues
+# export ROLLOUT_TRACE_DIR="/home/haofeiy2/OpenTinker/traces"
 export NVCC_EXECUTABLE=$CUDA_HOME/bin/nvcc
 export TORCH_CUDA_ARCH_LIST="9.0"
 export FLASHINFER_HOMOGENEOUS_MS=1
 
 # Disable sleep mode to avoid cumem allocator CUDA errors (V1 required for async engine)
 export VLLM_DISABLE_SLEEP_MODE=1
+
+# Limit Ray object store to prevent disk space issues
+# Default 200GB is too large and causes spilling to disk
+export RAY_object_store_memory=30000000000  # 50GB max
 
 # Default configuration
 AVAILABLE_GPUS="[0,1,2,3,4,5,6,7,8,9]"

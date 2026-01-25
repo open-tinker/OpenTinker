@@ -77,7 +77,7 @@ case "$1" in
             batch_size=16 \
             val_batch_size=32 \
             num_epochs=5 \
-            save_freq=10 \
+            save_freq=1000 \
             test_freq=100 \
             num_gpus=$NUM_GPUS \
             scheduler_url=http://0.0.0.0:$SCHEDULER_PORT \
