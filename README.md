@@ -10,7 +10,7 @@
     <a href="https://open-tinker.github.io/opentinker-page/">Project Page</a> ·
     <a href="https://deepwiki.com/open-tinker/OpenTinker">DeepWiki</a> ·
     <a href="https://join.slack.com/t/opentinker/shared_invite/zt-3lnxuxkfr-QZpzObNvW0DtcQUWzvKtQg">Slack</a> ·
-    <a href="https://raw.githubusercontent.com/open-tinker/Assets/e01c3be43247ac19b1e40d2a4ee54fde19cee869/wechat.JPG">Wechat</a>
+    <a href="https://github.com/open-tinker/Assets/blob/7be8029cd2546677ada5d077cfcd9dcebdda3a8c/IMG_9661.JPG">Wechat</a>
   </p>
 </div>
 
