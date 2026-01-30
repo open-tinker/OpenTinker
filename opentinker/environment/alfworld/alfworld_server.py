@@ -49,7 +49,7 @@ def main():
     parser.add_argument(
         "--split",
         type=str,
-        default="train",
+        default="eval_in_distribution",
         choices=["train", "eval_in_distribution", "eval_out_of_distribution"],
         help="Dataset split to use",
     )

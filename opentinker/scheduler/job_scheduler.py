@@ -1111,6 +1111,40 @@ class JobSchedulerActor:
                 f"Job {job.job_id}: ✓ LoRA enabled: rank={lora_rank}, alpha={lora_alpha}, target_modules={target_modules}"
             )
 
+        # Forward world model loss settings if specified
+        actor_config = job.config.get("actor", {})
+        if actor_config.get("use_world_model_loss"):
+            cmd.append("actor_rollout_ref.actor.use_world_model_loss=true")
+            wm_coef = actor_config.get("world_model_loss_coef", 0.1)
+            cmd.append(f"actor_rollout_ref.actor.world_model_loss_coef={wm_coef}")
+            logger.info(f"Job {job.job_id}: ✓ World Model Loss enabled: coef={wm_coef}")
+
+        # Forward WM active sampling settings if specified
+        if actor_config.get("wm_active_sampling"):
+            cmd.append("actor_rollout_ref.actor.wm_active_sampling=true")
+            wm_active_coef = actor_config.get("wm_active_sampling_coef", 0.5)
+            cmd.append(
+                f"actor_rollout_ref.actor.wm_active_sampling_coef={wm_active_coef}"
+            )
+            logger.info(
+                f"Job {job.job_id}: ✓ WM Active Sampling enabled: coef={wm_active_coef}"
+            )
+
+        # Forward WM dynamic entropy settings if specified
+        # Use + prefix to add new config keys that may not exist in the base schema
+        wm_dynamic_entropy = actor_config.get("wm_dynamic_entropy", {})
+        if wm_dynamic_entropy.get("enabled"):
+            cmd.append("+actor_rollout_ref.actor.wm_dynamic_entropy.enabled=true")
+            beta_0 = wm_dynamic_entropy.get("beta_0", 0.001)
+            beta_1 = wm_dynamic_entropy.get("beta_1", 0.01)
+            gamma = wm_dynamic_entropy.get("gamma", 1.0)
+            cmd.append(f"+actor_rollout_ref.actor.wm_dynamic_entropy.beta_0={beta_0}")
+            cmd.append(f"+actor_rollout_ref.actor.wm_dynamic_entropy.beta_1={beta_1}")
+            cmd.append(f"+actor_rollout_ref.actor.wm_dynamic_entropy.gamma={gamma}")
+            logger.info(
+                f"Job {job.job_id}: ✓ WM Dynamic Entropy enabled: beta_0={beta_0}, beta_1={beta_1}, gamma={gamma}"
+            )
+
         logger.info(f"Job {job.job_id}: Launching server with command: {' '.join(cmd)}")
 
         # Create log files for stdout and stderr with human-readable timestamp

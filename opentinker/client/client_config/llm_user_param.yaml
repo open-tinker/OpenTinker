@@ -1,0 +1,57 @@
+# LLM User Simulator Training Configuration
+# Train a conversational agent with LLM-based user simulation
+
+# Project settings
+project_name: opentinker
+experiment_name: llm_user_training
+
+# Logging
+logger_backends: ["console", "wandb"]
+enable_tracing: false
+wandb_key: null
+
+# Model and tokenizer
+tokenizer_path: null
+
+# Training parameters
+batch_size: 8
+num_workers: 4
+num_steps: 1000
+save_freq: 500
+test_freq: 10
+val_batch_size: 20
+
+# Generation parameters
+temperature: 0.8
+top_p: 0.95
+max_new_tokens: 4096
+max_prompt_tokens: 2048
+
+# Algorithm
+algorithm: "agent_loop"
+adv_estimator: "grpo"
+rollout_n: 4
+
+# Interaction configuration
+interaction:
+  name: llm_user_simulator
+  class_path: opentinker.environment.gym_environment_interaction.GymEnvironmentInteraction
+  config:
+    env_host: 0.0.0.0
+    env_port: 8100
+    env_endpoint: http://${interaction.config.env_host}:${interaction.config.env_port}
+    env_shards: 8
+    max_steps: 10
+    observation_template: "{observation}"
+
+multi_turn:
+  max_user_turns: 10
+  max_assistant_turns: 10
+  max_tokens_per_turn: 512
+
+# Scheduler settings
+scheduler_url: "http://0.0.0.0:8780"
+scheduler_api_key: null
+
+# GPU settings
+num_gpus: 4

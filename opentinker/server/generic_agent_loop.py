@@ -117,6 +117,16 @@ class GenericAgentData:
         self.response_mask: list[int] = []
         self.response_logprobs: list[float] = []
 
+        # Observation mask for world model loss
+        # observation_mask=1 for environment observation tokens (used for world model SFT loss)
+        # observation_mask=0 for LLM-generated action tokens
+        self.observation_mask: list[int] = []
+
+        # Turn index for each token (used for turn-wise dynamic entropy coefficient)
+        # turn_ids[i] = which turn token i belongs to (0-indexed)
+        # This allows computing per-turn WM uncertainty and applying different entropy weights
+        self.turn_ids: list[int] = []
+
         # Turn tracking
         self.user_turns = 0
         self.assistant_turns = 0
@@ -453,6 +463,13 @@ class GenericAgentLoop(AgentLoopBase):
         # Ensure env_info exists for all samples (even if empty) for consistent DataProto.concat
         output.extra_fields["env_info"] = agent_data.extra_fields.get("env_info", [])
         output.extra_fields["turn_scores"] = agent_data.turn_scores
+        # Add observation_mask for world model loss (marks environment feedback tokens)
+        output.extra_fields["observation_mask"] = agent_data.observation_mask[
+            : self.response_length
+        ]
+        # Add turn_ids for turn-wise dynamic entropy coefficient
+        # turn_ids[i] = which turn token i belongs to (0-indexed)
+        output.extra_fields["turn_ids"] = agent_data.turn_ids[: self.response_length]
         # Add any other extra fields (except the ones we already set)
         for key, value in agent_data.extra_fields.items():
             if key not in output.extra_fields:
@@ -503,6 +520,7 @@ class GenericAgentLoop(AgentLoopBase):
         """Handle the generating state: generate LLM response.
 
         The generated tokens are marked with mask=1 (included in loss computation).
+        Turn IDs are recorded for turn-wise dynamic entropy coefficient.
         """
         import time
 
@@ -530,10 +548,17 @@ class GenericAgentLoop(AgentLoopBase):
                     agent_data.response_ids = [eos_token_id]
                     agent_data.prompt_ids.append(eos_token_id)
                     agent_data.response_mask.append(1)
+                    agent_data.observation_mask.append(0)  # EOS is LLM-generated
+                    agent_data.turn_ids.append(
+                        agent_data.assistant_turns
+                    )  # Current turn
             return GenericAgentState.TERMINATED
 
+        # Current turn index (0-indexed, based on assistant turns)
+        current_turn = agent_data.assistant_turns
+
         print(
-            f"[GenericAgentLoop DEBUG] _handle_generating_state START: request_id={agent_data.request_id}, prompt_len={len(agent_data.prompt_ids)}"
+            f"[GenericAgentLoop DEBUG] _handle_generating_state START: request_id={agent_data.request_id}, prompt_len={len(agent_data.prompt_ids)}, turn={current_turn}"
         )
         start_time = time.time()
         with simple_timer("generate_sequences", agent_data.metrics):
@@ -573,6 +598,13 @@ class GenericAgentLoop(AgentLoopBase):
         agent_data.response_mask += [1] * len(
             agent_data.response_ids
         )  # mask=1 for LLM tokens
+        agent_data.observation_mask += [0] * len(
+            agent_data.response_ids
+        )  # observation_mask=0 for LLM-generated actions
+
+        # Record turn ID for each token (used for turn-wise dynamic entropy coefficient)
+        # current_turn was captured BEFORE incrementing assistant_turns
+        agent_data.turn_ids += [current_turn] * len(agent_data.response_ids)
 
         if response_log_probs:
             agent_data.response_logprobs += response_log_probs
@@ -672,9 +704,15 @@ class GenericAgentLoop(AgentLoopBase):
             return GenericAgentState.TERMINATED
 
         # Update prompt_ids and response_mask
-        # mask=0 for environment observation tokens (not included in loss)
+        # mask=0 for environment observation tokens (not included in policy loss)
         agent_data.prompt_ids += response_ids
         agent_data.response_mask += [0] * len(response_ids)
+        # observation_mask=1 for environment observation tokens (used for world model SFT loss)
+        agent_data.observation_mask += [1] * len(response_ids)
+        # turn_ids: observation belongs to the previous turn (action that caused this observation)
+        # Use (assistant_turns - 1) since assistant_turns was already incremented in _handle_generating_state
+        obs_turn = max(0, agent_data.assistant_turns - 1)
+        agent_data.turn_ids += [obs_turn] * len(response_ids)
 
         if agent_data.response_logprobs:
             # Pad logprobs with 0.0 for observation tokens

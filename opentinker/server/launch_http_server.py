@@ -22,6 +22,8 @@ def main(cfg):
 
     os.environ["RAY_DEDUP_LOGS"] = "0"
     os.environ["HYDRA_FULL_ERROR"] = "1"
+    # Disable sleep mode to avoid cumem allocator issues (CUDA Error: invalid argument)
+    os.environ["VLLM_DISABLE_SLEEP_MODE"] = "1"
 
     from omegaconf import open_dict
     import logging
@@ -123,7 +125,9 @@ def main(cfg):
         cfg.trainer.save_freq = 500
         cfg.trainer.test_freq = 500
         cfg.trainer.total_epochs = 15
-        cfg.trainer.default_local_dir = "/workspace/verl/verl/ckpts"
+        cfg.trainer.default_local_dir = os.path.expanduser(
+            "/mnt/disk1_from_server2/haofeiy2/opentinker_checkpoints"
+        )
 
     # ---------------------------------------------------------
     # Agent Loop Configuration
@@ -138,8 +142,11 @@ def main(cfg):
         logger.info("Agent Loop Mode Enabled")
         logger.info("=" * 60)
 
+        # Async engine requires V1, so force it. VLLM_DISABLE_SLEEP_MODE=1 handles cumem issues.
         os.environ["VLLM_USE_V1"] = "1"
-        logger.info("Set VLLM_USE_V1=1 for async rollout")
+        logger.info(
+            "VLLM_USE_V1=1 for async rollout (sleep mode disabled to avoid cumem issues)"
+        )
 
         # Increase Ray's memory threshold to avoid premature OOM kills
         # Default is 0.95 (95%), we increase to 0.98 (98%)

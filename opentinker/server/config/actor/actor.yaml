@@ -92,6 +92,35 @@ ppo_epochs: 1
 # Shuffle training data across PPO epochs
 shuffle: false
 
+# World model loss: auxiliary SFT loss for predicting environment observations
+# This helps the model learn a world model of the environment in multi-turn agentic tasks
+use_world_model_loss: false
+
+# Coefficient for world model loss
+world_model_loss_coef: 0.1
+
+# WM Active Sampling: use WM uncertainty to weight policy gradient
+# High uncertainty samples get higher advantage -> agent learns more from uncertain states
+# Low uncertainty (redundant) samples get lower weight -> less gradient
+# Uses OLD log_prob (lagged theta^-) for stable weights across PPO epochs
+# Weights computed at MINI-BATCH level for consistency across gradient accumulation
+# Auto-detects observation_mask format (bool mask vs index list)
+wm_active_sampling: false
+
+# Alpha coefficient for WM active sampling: weight = exp(alpha * z_score)
+# Higher alpha = stronger emphasis on uncertainty differences
+wm_active_sampling_coef: 0.5
+
+# Minimum weight for WM active sampling (allows down-weighting redundant samples)
+wm_active_wmin: 0.5
+
+# Maximum weight for WM active sampling (caps up-weighting uncertain samples)
+wm_active_wmax: 2.0
+
+# Only apply WM weights to positive advantages (avoid penalizing exploration)
+# Useful when reward is sparse and early exploration often fails
+wm_active_positive_only: false
+
 # checkpoint configs
 checkpoint:
   # Target dataclass for this configuration
