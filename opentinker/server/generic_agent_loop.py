@@ -163,6 +163,7 @@ class GenericAgentLoop(AgentLoopBase):
 
         cls.tokenizer = tokenizer
         cls.processor = processor
+        cls._tokenizer_lock = threading.Lock()
         cls.max_user_turns = config.actor_rollout_ref.rollout.multi_turn.max_user_turns
         cls.max_assistant_turns = (
             config.actor_rollout_ref.rollout.multi_turn.max_assistant_turns
@@ -180,11 +181,13 @@ class GenericAgentLoop(AgentLoopBase):
         )
 
         # Pre-compute system prompt tokens for later stripping
-        cls.system_prompt = tokenizer.apply_chat_template(
-            [{}],
-            add_generation_prompt=False,
-            tokenize=True,
-            **cls.apply_chat_template_kwargs,
+        cls.system_prompt = cls._with_tokenizer_lock(
+            lambda: tokenizer.apply_chat_template(
+                [{}],
+                add_generation_prompt=False,
+                tokenize=True,
+                **cls.apply_chat_template_kwargs,
+            )
         )
 
         # Initialize interactions from config
@@ -468,6 +471,9 @@ class GenericAgentLoop(AgentLoopBase):
         self, agent_data: GenericAgentData, sampling_params: dict[str, Any]
     ) -> GenericAgentState:
         """Handle the pending state: tokenize the initial prompt."""
+        agent_data.messages = self._truncate_messages_to_prompt_length(
+            agent_data.messages
+        )
         if self.processor is not None:
             raw_prompt = await self.loop.run_in_executor(
                 None,
@@ -479,23 +485,135 @@ class GenericAgentLoop(AgentLoopBase):
                 ),
             )
             # CRITICAL: Pass images to processor for VL models
-            model_inputs = self.processor(
-                text=[raw_prompt],
-                images=agent_data.image_data if agent_data.image_data else None,
-                return_tensors="pt",
+            model_inputs = self._with_tokenizer_lock(
+                lambda: self.processor(
+                    text=[raw_prompt],
+                    images=agent_data.image_data if agent_data.image_data else None,
+                    return_tensors="pt",
+                )
             )
             agent_data.prompt_ids = model_inputs.pop("input_ids").squeeze(0).tolist()
         else:
             agent_data.prompt_ids = await self.loop.run_in_executor(
                 None,
-                lambda: self.tokenizer.apply_chat_template(
-                    agent_data.messages,
-                    add_generation_prompt=True,
-                    tokenize=True,
-                    **self.apply_chat_template_kwargs,
+                lambda: self._with_tokenizer_lock(
+                    lambda: self.tokenizer.apply_chat_template(
+                        agent_data.messages,
+                        add_generation_prompt=True,
+                        tokenize=True,
+                        **self.apply_chat_template_kwargs,
+                    )
                 ),
             )
         return GenericAgentState.GENERATING
+
+    def _build_raw_prompt(self, messages: list[dict[str, Any]]) -> str:
+        if self.processor is not None:
+            return self._with_tokenizer_lock(
+                lambda: self.processor.apply_chat_template(
+                    messages,
+                    add_generation_prompt=True,
+                    tokenize=False,
+                    **self.apply_chat_template_kwargs,
+                )
+            )
+        return self._with_tokenizer_lock(
+            lambda: self.tokenizer.apply_chat_template(
+                messages,
+                add_generation_prompt=True,
+                tokenize=False,
+                **self.apply_chat_template_kwargs,
+            )
+        )
+
+    @classmethod
+    def _with_tokenizer_lock(cls, func):
+        # Fast tokenizers are not thread-safe when setting truncation/padding.
+        # Guard all tokenization calls to prevent "Already borrowed" errors.
+        with cls._tokenizer_lock:
+            return func()
+
+    def _encode_with_overflow(
+        self, text: str, max_length: int
+    ) -> tuple[list[int], bool]:
+        if not text:
+            return [], False
+        safe_max_length = max_length
+        if getattr(self.tokenizer, "model_max_length", None):
+            try:
+                safe_max_length = min(max_length, int(self.tokenizer.model_max_length))
+            except (TypeError, ValueError):
+                safe_max_length = max_length
+        encoded = self._with_tokenizer_lock(
+            lambda: self.tokenizer(
+                text,
+                add_special_tokens=False,
+                truncation=True,
+                max_length=safe_max_length,
+                return_overflowing_tokens=True,
+                return_attention_mask=False,
+            )
+        )
+        input_ids = encoded.get("input_ids", [])
+        if input_ids and isinstance(input_ids[0], list):
+            input_ids = input_ids[0]
+        overflow = bool(encoded.get("overflowing_tokens"))
+        return list(input_ids), overflow
+
+    def _truncate_messages_to_prompt_length(
+        self, messages: list[dict[str, Any]]
+    ) -> list[dict[str, Any]]:
+        if not self.prompt_length:
+            return messages
+
+        raw_prompt = self._build_raw_prompt(messages)
+        prompt_ids, overflow = self._encode_with_overflow(
+            raw_prompt, self.prompt_length
+        )
+        if not overflow and len(prompt_ids) <= self.prompt_length:
+            return messages
+
+        truncated = [dict(m) for m in messages]
+        while truncated:
+            last_idx = len(truncated) - 1
+            prefix_messages = [dict(m) for m in truncated]
+            prefix_messages[last_idx]["content"] = ""
+            prefix_prompt = self._build_raw_prompt(prefix_messages)
+            prefix_ids, prefix_overflow = self._encode_with_overflow(
+                prefix_prompt, self.prompt_length
+            )
+
+            if not prefix_overflow and len(prefix_ids) <= self.prompt_length:
+                remaining = self.prompt_length - len(prefix_ids)
+                last_content = truncated[last_idx].get("content", "")
+                if remaining <= 0:
+                    truncated[last_idx]["content"] = ""
+                else:
+                    last_ids, _ = self._encode_with_overflow(
+                        last_content, remaining
+                    )
+                    truncated[last_idx]["content"] = self._with_tokenizer_lock(
+                        lambda: self.tokenizer.decode(last_ids)
+                    )
+                return truncated
+
+            if len(truncated) > 1:
+                drop_idx = 1 if truncated[0].get("role") == "system" else 0
+                truncated.pop(drop_idx)
+                continue
+
+            remaining = max(self.prompt_length - len(prefix_ids), 0)
+            last_content = truncated[0].get("content", "")
+            if remaining > 0:
+                last_ids, _ = self._encode_with_overflow(last_content, remaining)
+                truncated[0]["content"] = self._with_tokenizer_lock(
+                    lambda: self.tokenizer.decode(last_ids)
+                )
+            else:
+                truncated[0]["content"] = ""
+            return truncated
+
+        return messages
 
     async def _handle_generating_state(
         self, agent_data: GenericAgentData, sampling_params: dict[str, Any]
@@ -532,6 +650,55 @@ class GenericAgentLoop(AgentLoopBase):
                     agent_data.response_mask.append(1)
             return GenericAgentState.TERMINATED
 
+        # Enforce a hard cap for generation length to avoid extremely long outputs.
+        # This keeps validation from hanging due to runaway generations.
+        effective_sampling_params = (
+            dict(sampling_params) if isinstance(sampling_params, dict) else sampling_params
+        )
+        if isinstance(effective_sampling_params, dict):
+            max_candidates = []
+            # Cap by model context budget (prompt + response)
+            max_tokens_by_context = total_context_budget - len(agent_data.prompt_ids)
+            max_candidates.append(max_tokens_by_context)
+
+            # Cap by remaining response budget for the whole trajectory
+            if self.response_length is not None:
+                remaining_response_budget = (
+                    self.response_length - len(agent_data.response_mask)
+                )
+                max_candidates.append(remaining_response_budget)
+
+            # Cap by per-turn limit if configured
+            if self.max_tokens_per_turn:
+                max_candidates.append(self.max_tokens_per_turn)
+
+            # Cap by any existing sampling params
+            for key in ("max_tokens", "max_new_tokens"):
+                value = effective_sampling_params.get(key)
+                if value is not None:
+                    max_candidates.append(int(value))
+
+            # Filter non-positive values
+            max_candidates = [c for c in max_candidates if c is not None]
+            max_tokens = min(max_candidates) if max_candidates else None
+            if max_tokens is not None:
+                if max_tokens <= 0:
+                    logger.warning(
+                        f"[GenericAgentLoop] No generation budget left: prompt_len={len(agent_data.prompt_ids)}, "
+                        f"response_used={len(agent_data.response_mask)}, response_length={self.response_length}."
+                    )
+                    # Add a placeholder response if none exists yet (so we have valid output)
+                    if not agent_data.response_ids:
+                        eos_token_id = self.tokenizer.eos_token_id
+                        if eos_token_id is not None:
+                            agent_data.response_ids = [eos_token_id]
+                            agent_data.prompt_ids.append(eos_token_id)
+                            agent_data.response_mask.append(1)
+                    return GenericAgentState.TERMINATED
+                # vLLM uses max_tokens; keep max_new_tokens in sync for compatibility
+                effective_sampling_params["max_tokens"] = max_tokens
+                effective_sampling_params["max_new_tokens"] = max_tokens
+
         print(
             f"[GenericAgentLoop DEBUG] _handle_generating_state START: request_id={agent_data.request_id}, prompt_len={len(agent_data.prompt_ids)}"
         )
@@ -544,7 +711,7 @@ class GenericAgentLoop(AgentLoopBase):
             output = await self.server_manager.generate(
                 request_id=agent_data.request_id,
                 prompt_ids=agent_data.prompt_ids,
-                sampling_params=sampling_params,
+                sampling_params=effective_sampling_params,
                 image_data=agent_data.image_data,
             )
             elapsed = time.time() - start_time
@@ -595,8 +762,10 @@ class GenericAgentLoop(AgentLoopBase):
         if agent_data.interaction is not None:
             assistant_message = await self.loop.run_in_executor(
                 None,
-                lambda: self.tokenizer.decode(
-                    agent_data.response_ids, skip_special_tokens=True
+                lambda: self._with_tokenizer_lock(
+                    lambda: self.tokenizer.decode(
+                        agent_data.response_ids, skip_special_tokens=True
+                    )
                 ),
             )
             agent_data.messages.append(
@@ -654,13 +823,17 @@ class GenericAgentLoop(AgentLoopBase):
                     **self.apply_chat_template_kwargs,
                 ),
             )
-            model_inputs = self.processor(text=[raw_user_response], return_tensors="pt")
+            model_inputs = self._with_tokenizer_lock(
+                lambda: self.processor(text=[raw_user_response], return_tensors="pt")
+            )
             response_ids = model_inputs.pop("input_ids").squeeze(0).tolist()
         else:
             response_ids = await self.loop.run_in_executor(
                 None,
-                lambda: self.tokenizer.apply_chat_template(
-                    add_messages, add_generation_prompt=True, tokenize=True
+                lambda: self._with_tokenizer_lock(
+                    lambda: self.tokenizer.apply_chat_template(
+                        add_messages, add_generation_prompt=True, tokenize=True
+                    )
                 ),
             )
 
@@ -758,14 +931,18 @@ class GenericAgentLoop(AgentLoopBase):
             # Decode text for readability
             prompt_text = await self.loop.run_in_executor(
                 None,
-                lambda: self.tokenizer.decode(
-                    output.prompt_ids, skip_special_tokens=True
+                lambda: self._with_tokenizer_lock(
+                    lambda: self.tokenizer.decode(
+                        output.prompt_ids, skip_special_tokens=True
+                    )
                 ),
             )
             response_text = await self.loop.run_in_executor(
                 None,
-                lambda: self.tokenizer.decode(
-                    output.response_ids, skip_special_tokens=True
+                lambda: self._with_tokenizer_lock(
+                    lambda: self.tokenizer.decode(
+                        output.response_ids, skip_special_tokens=True
+                    )
                 ),
             )
 

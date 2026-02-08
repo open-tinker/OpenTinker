@@ -4,7 +4,6 @@ This module provides the environment framework for LLM training, including:
 - BaseEnvironment: Abstract base class for all environments
 - GameEnvironment: For multi-turn game environments (Gomoku, etc.)
 - StaticDataEnvironment: For single-turn static datasets (Math, etc.)
-- Data generators and utilities
 """
 
 # Base classes
@@ -41,6 +40,8 @@ from opentinker.environment.inference_pipeline import (
     generate_samples,
 )
 
+from opentinker.environment.swegym import SWEGymGame
+
 __all__ = [
     # Base
     "BaseEnvironment",
@@ -70,4 +71,6 @@ __all__ = [
     "GameStats",
     "create_game_server",
     "run_game_server",
+    # SWE-Gym
+    "SWEGymGame",
 ]

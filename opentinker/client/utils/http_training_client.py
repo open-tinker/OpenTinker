@@ -59,9 +59,42 @@ class HTTPTrainingClient:
     ) -> Dict[str, Any]:
         url = f"{self.server_url}/api/v1/{endpoint}"
         timeout = timeout or self.timeout
+        overall_start = time.monotonic()
+
+        def _summarize_payload(payload: Optional[Dict[str, Any]]) -> str:
+            if not payload:
+                return "none"
+            summary_parts = [f"keys={len(payload)}"]
+            keys_preview = list(payload.keys())[:6]
+            summary_parts.append(f"keys_preview={keys_preview}")
+            if "batch_data" in payload:
+                batch_data = payload.get("batch_data")
+                if isinstance(batch_data, str):
+                    summary_parts.append(f"batch_data_chars={len(batch_data)}")
+                elif isinstance(batch_data, list):
+                    summary_parts.append(f"batch_data_len={len(batch_data)}")
+                elif isinstance(batch_data, dict):
+                    summary_parts.append(f"batch_data_keys={len(batch_data)}")
+                else:
+                    summary_parts.append(f"batch_data_type={type(batch_data).__name__}")
+            return ", ".join(summary_parts)
+
+        payload_summary = _summarize_payload(json_data)
 
         for attempt in range(self.max_retries):
+            attempt_start = time.monotonic()
             try:
+                logger.info(
+                    "HTTP request start: method=%s endpoint=%s url=%s timeout=%.1fs "
+                    "attempt=%d/%d payload={%s}",
+                    method.upper(),
+                    endpoint,
+                    url,
+                    float(timeout),
+                    attempt + 1,
+                    self.max_retries,
+                    payload_summary,
+                )
                 if method.upper() == "GET":
                     response = self.session.get(url, timeout=timeout)
                 elif method.upper() == "POST":
@@ -70,21 +103,76 @@ class HTTPTrainingClient:
                     raise ValueError(f"Unsupported HTTP method: {method}")
 
                 response.raise_for_status()
+                attempt_elapsed = time.monotonic() - attempt_start
+                total_elapsed = time.monotonic() - overall_start
+                logger.info(
+                    "HTTP request success: endpoint=%s status=%s attempt=%d/%d "
+                    "elapsed=%.1fs total_elapsed=%.1fs",
+                    endpoint,
+                    getattr(response, "status_code", "unknown"),
+                    attempt + 1,
+                    self.max_retries,
+                    attempt_elapsed,
+                    total_elapsed,
+                )
                 return response.json()
 
             except requests.exceptions.Timeout:
+                attempt_elapsed = time.monotonic() - attempt_start
+                total_elapsed = time.monotonic() - overall_start
                 logger.warning(
-                    f"Request to {endpoint} timed out (attempt {attempt + 1}/{self.max_retries})"
+                    "Request timed out: endpoint=%s url=%s timeout=%.1fs "
+                    "attempt=%d/%d elapsed=%.1fs total_elapsed=%.1fs payload={%s}",
+                    endpoint,
+                    url,
+                    float(timeout),
+                    attempt + 1,
+                    self.max_retries,
+                    attempt_elapsed,
+                    total_elapsed,
+                    payload_summary,
                 )
-            except requests.exceptions.ConnectionError:
+            except requests.exceptions.ConnectionError as e:
                 logger.warning(
-                    f"Connection error for {endpoint} (attempt {attempt + 1}/{self.max_retries})"
+                    "Connection error: endpoint=%s url=%s attempt=%d/%d error=%s",
+                    endpoint,
+                    url,
+                    attempt + 1,
+                    self.max_retries,
+                    e,
                 )
             except requests.exceptions.HTTPError as e:
-                logger.error(f"HTTP error for {endpoint}: {e}")
+                response_text = ""
+                if getattr(e, "response", None) is not None:
+                    try:
+                        response_text = e.response.text or ""
+                    except Exception:
+                        response_text = ""
+                if response_text:
+                    logger.error(
+                        "HTTP error: endpoint=%s status=%s error=%s response=%s",
+                        endpoint,
+                        getattr(e.response, "status_code", "unknown"),
+                        e,
+                        response_text[:500],
+                    )
+                else:
+                    logger.error(
+                        "HTTP error: endpoint=%s status=%s error=%s",
+                        endpoint,
+                        getattr(e.response, "status_code", "unknown"),
+                        e,
+                    )
                 raise
             except Exception as e:
-                logger.error(f"Unexpected error for {endpoint}: {e}")
+                logger.error(
+                    "Unexpected error: endpoint=%s url=%s attempt=%d/%d error=%s",
+                    endpoint,
+                    url,
+                    attempt + 1,
+                    self.max_retries,
+                    e,
+                )
                 if attempt == self.max_retries - 1:
                     raise
 
@@ -162,10 +250,13 @@ class HTTPTrainingClient:
         return result
 
     def validate(self, batch: DataProto) -> Dict[str, Any]:
+        logger.info("Requesting validation...")
         batch_data = serialize_dataproto(batch)
+        #logger.info(f"Validation batch data: {batch_data}")
         result = self._make_request(
             "POST", "validate", json_data={"batch_data": batch_data}
         )
+        logger.info(f"Validation result: {result}")
 
         return result
 
@@ -898,23 +989,23 @@ class ServiceClient:
 
         # Reset game stats before validation (if game_stats_client provided)
         if game_stats_client:
+            logger.info("Resetting game stats before validation...")
             try:
                 game_stats_client.reset_step()
+                logger.info("Game stats reset successfully before validation")
             except Exception as e:
                 logger.warning(f"Failed to reset game stats for validation: {e}")
 
+        logger.info("Validation started...")
+
         for i, batch_dict in enumerate(val_dataloader):
+            logger.info(f"Validation batch {i} started...")
             batch = DataProto.from_single_dict(batch_dict)
+            logger.info(f"Validation batch {i} converted to DataProto...")
             result = self.client.validate(batch)
-
-            if result["status"] != "success":
-                logger.warning(f"Validation batch {i} failed: {result.get('error')}")
-                continue
-
+            logger.info(f"Validation batch {i} completed...")
             all_metrics.append(result["metrics"])
-
-        if not all_metrics:
-            return {}
+            logger.info(f"Validation batch {i} metrics: {result['metrics']}")
 
         aggregated = {}
         for key in all_metrics[0].keys():

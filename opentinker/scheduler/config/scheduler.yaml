@@ -1,7 +1,7 @@
 # Job Scheduler Configuration
 
 # GPU IDs available for job allocation
-available_gpus: [0, 1, 2, 3]
+available_gpus: [3, 4, 5, 6, 7, 8]
 
 # Number of GPUs to allocate per job
 gpus_per_job: 4
@@ -17,7 +17,10 @@ num_ports: 50
 scheduler_port: 8765
 
 # Authentication settings
-enable_auth: false # Set to false to disable authentication
+enable_auth: true # Set to false to disable authentication
 
 # Path to SQLite user database
 user_db_path: "scheduler_users.db"
+
+# Directory to store job logs
+logs_dir: "/workspace/logs"

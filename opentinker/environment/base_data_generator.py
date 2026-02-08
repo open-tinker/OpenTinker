@@ -153,6 +153,99 @@ class DynamicGameDataset(Dataset):
     def __len__(self) -> int:
         return self.virtual_size
 
+    def _build_raw_prompt(self, messages: List[Dict[str, Any]]) -> str:
+        if self.processor is not None:
+            return self.processor.apply_chat_template(
+                messages,
+                add_generation_prompt=True,
+                tokenize=False,
+                **self.apply_chat_template_kwargs,
+            )
+        if hasattr(self.tokenizer, "chat_template") and self.tokenizer.chat_template:
+            return self.tokenizer.apply_chat_template(
+                messages,
+                add_generation_prompt=True,
+                tokenize=False,
+                **self.apply_chat_template_kwargs,
+            )
+        return (
+            "\n\n".join(f"[{msg['role'].upper()}]\n{msg['content']}" for msg in messages)
+            + "\n\n[ASSISTANT]\n"
+        )
+
+    def _encode_with_overflow(
+        self, text: str, max_length: int
+    ) -> tuple[list[int], bool]:
+        if not text:
+            return [], False
+        safe_max_length = max_length
+        if getattr(self.tokenizer, "model_max_length", None):
+            try:
+                safe_max_length = min(max_length, int(self.tokenizer.model_max_length))
+            except (TypeError, ValueError):
+                safe_max_length = max_length
+        encoded = self.tokenizer(
+            text,
+            add_special_tokens=False,
+            truncation=True,
+            max_length=safe_max_length,
+            return_overflowing_tokens=True,
+            return_attention_mask=False,
+        )
+        input_ids = encoded.get("input_ids", [])
+        if input_ids and isinstance(input_ids[0], list):
+            input_ids = input_ids[0]
+        overflow = bool(encoded.get("overflowing_tokens"))
+        return list(input_ids), overflow
+
+    def _truncate_messages_to_max_tokens(
+        self, messages: List[Dict[str, Any]]
+    ) -> List[Dict[str, Any]]:
+        if not self.max_prompt_length:
+            return messages
+
+        raw_prompt = self._build_raw_prompt(messages)
+        prompt_ids, overflow = self._encode_with_overflow(
+            raw_prompt, self.max_prompt_length
+        )
+        if not overflow and len(prompt_ids) <= self.max_prompt_length:
+            return messages
+
+        truncated = [dict(m) for m in messages]
+        while truncated:
+            last_idx = len(truncated) - 1
+            prefix_messages = [dict(m) for m in truncated]
+            prefix_messages[last_idx]["content"] = ""
+            prefix_prompt = self._build_raw_prompt(prefix_messages)
+            prefix_ids, prefix_overflow = self._encode_with_overflow(
+                prefix_prompt, self.max_prompt_length
+            )
+
+            if not prefix_overflow and len(prefix_ids) <= self.max_prompt_length:
+                remaining = self.max_prompt_length - len(prefix_ids)
+                last_content = truncated[last_idx].get("content", "")
+                if remaining <= 0:
+                    truncated[last_idx]["content"] = ""
+                else:
+                    last_ids, _ = self._encode_with_overflow(last_content, remaining)
+                    truncated[last_idx]["content"] = self.tokenizer.decode(last_ids)
+                return truncated
+
+            if len(truncated) > 1:
+                truncated = truncated[1:]
+                continue
+
+            remaining = max(self.max_prompt_length - len(prefix_ids), 0)
+            last_content = truncated[0].get("content", "")
+            if remaining > 0:
+                last_ids, _ = self._encode_with_overflow(last_content, remaining)
+                truncated[0]["content"] = self.tokenizer.decode(last_ids)
+            else:
+                truncated[0]["content"] = ""
+            return truncated
+
+        return messages
+
     def __getitem__(self, item: int) -> Dict[str, Any]:
         """Get a dynamically generated sample."""
         import random
@@ -164,41 +257,42 @@ class DynamicGameDataset(Dataset):
         # Generate sample from data generator
         # breakpoint()
         sample = self.data_generator.generate_sample(item)
-        messages = sample["prompt"]
+        messages = self._truncate_messages_to_max_tokens(sample["prompt"])
 
         # Apply chat template
         if self.processor is not None:
-            raw_prompt = self.processor.apply_chat_template(
-                messages,
-                add_generation_prompt=True,
-                tokenize=False,
-                **self.apply_chat_template_kwargs,
-            )
-            model_inputs = self.processor(text=[raw_prompt], return_tensors="pt")
+            raw_prompt = self._build_raw_prompt(messages)
+            try:
+                model_inputs = self.processor(
+                    text=[raw_prompt],
+                    return_tensors="pt",
+                    truncation=True,
+                    max_length=self.max_prompt_length,
+                )
+            except TypeError:
+                model_inputs = self.processor(text=[raw_prompt], return_tensors="pt")
             input_ids = model_inputs.pop("input_ids")
             attention_mask = model_inputs.pop("attention_mask")
         elif hasattr(self.tokenizer, "chat_template") and self.tokenizer.chat_template:
-            raw_prompt = self.tokenizer.apply_chat_template(
-                messages,
-                add_generation_prompt=True,
-                tokenize=False,
-                **self.apply_chat_template_kwargs,
-            )
+            raw_prompt = self._build_raw_prompt(messages)
             model_inputs = self.tokenizer(
-                raw_prompt, return_tensors="pt", add_special_tokens=False
+                raw_prompt,
+                return_tensors="pt",
+                add_special_tokens=False,
+                truncation=True,
+                max_length=self.max_prompt_length,
             )
             input_ids = model_inputs.pop("input_ids")
             attention_mask = model_inputs.pop("attention_mask")
         else:
             # Fallback: simple concatenation
-            raw_prompt = (
-                "\n\n".join(
-                    f"[{msg['role'].upper()}]\n{msg['content']}" for msg in messages
-                )
-                + "\n\n[ASSISTANT]\n"
-            )
+            raw_prompt = self._build_raw_prompt(messages)
             model_inputs = self.tokenizer(
-                raw_prompt, return_tensors="pt", add_special_tokens=True
+                raw_prompt,
+                return_tensors="pt",
+                add_special_tokens=True,
+                truncation=True,
+                max_length=self.max_prompt_length,
             )
             input_ids = model_inputs.pop("input_ids")
             attention_mask = model_inputs.pop("attention_mask")
@@ -225,12 +319,9 @@ class DynamicGameDataset(Dataset):
         }
 
         # Raw prompt IDs
-        raw_prompt_ids = self.tokenizer.encode(raw_prompt, add_special_tokens=False)
-        if len(raw_prompt_ids) > self.max_prompt_length:
-            if self.truncation == "left":
-                raw_prompt_ids = raw_prompt_ids[-self.max_prompt_length :]
-            else:
-                raw_prompt_ids = raw_prompt_ids[: self.max_prompt_length]
+        raw_prompt_ids, _ = self._encode_with_overflow(
+            raw_prompt, self.max_prompt_length
+        )
         row_dict["raw_prompt_ids"] = raw_prompt_ids
 
         # Raw chat for agent_loop

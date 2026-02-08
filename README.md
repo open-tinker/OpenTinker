@@ -27,6 +27,7 @@ Choose an example below to get started. Each example includes step-by-step instr
 | **[VLM Multi-Turn Math](docs/vlm_geo3k_multiturn.md)**             | geometry 3k math problem solving with tool calling                                           | [wandb](https://wandb.ai/zsqzz/Open-Tinker/runs/r39htm2o?nw=nwuserzhusq20)                |
 | **[LLM Gomoku Agent](docs/gomoku_multiturn.md)**       | A multi-turn gomoku agent | [wandb](https://wandb.ai/zsqzz/Open-Tinker/runs/7a7ggkw3?nw=nwuserzhusq20)                        |
 | **[LLM AlfWorld Agent](docs/alfworld_multiturn.md)**       | A multi-turn alfworld agent | [wandb](https://wandb.ai/1125027232/opentinker-public/runs/3jrlolk7?nw=nwuser1125027232)                        |
+| **[LLM SWE-Gym Agent](docs/swegym_multiturn.md)**       | A multi-turn SWE-Gym agent | (TBD)                        |
 
 
 ## 📦 Installation
@@ -157,3 +158,4 @@ This 2×2 design space enables four distinct paradigms, each suited to different
       url={https://arxiv.org/abs/2601.07376}, 
 }
 ```
+

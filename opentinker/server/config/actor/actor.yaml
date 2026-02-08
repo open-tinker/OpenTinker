@@ -12,7 +12,7 @@ _target_: verl.workers.config.ActorConfig
 strategy: ???
 
 # Split each sample into sub-batches of this size for PPO
-ppo_mini_batch_size: 256
+ppo_mini_batch_size: 64
 
 # [Deprecated] Global micro batch size
 ppo_micro_batch_size: null
@@ -22,12 +22,12 @@ ppo_micro_batch_size_per_gpu: null
 
 # Whether to automatically adjust batch size at runtime
 # oc.select: the default val for ref.log_prob_use_dynamic_bsz
-use_dynamic_bsz: false
+use_dynamic_bsz: true
 
 # Max tokens per GPU in one PPO batch; affects gradient accumulation
 # Typically it should be: n * ${data.max_prompt_length} + ${data.max_response_length}
 # oc.select: the default val for ref.log_prob_max_token_len_per_gpu
-ppo_max_token_len_per_gpu: 16384
+ppo_max_token_len_per_gpu: 65536
 
 # PPO clip ratio
 clip_ratio: 0.2

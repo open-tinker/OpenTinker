@@ -66,6 +66,29 @@ def main(cfg):
         cfg.actor_rollout_ref.rollout.name = "vllm"
         cfg.actor_rollout_ref.rollout.gpu_memory_utilization = 0.6
 
+        # Align model/rollout dtype for vLLM + FlashAttention stability.
+        if cfg.actor_rollout_ref.actor.fsdp_config.get("model_dtype", "fp32") in (
+            None,
+            "fp32",
+            "float32",
+        ):
+            cfg.actor_rollout_ref.actor.fsdp_config.model_dtype = "bf16"
+        if not cfg.actor_rollout_ref.rollout.get("dtype"):
+            cfg.actor_rollout_ref.rollout.dtype = "bfloat16"
+
+        # Ensure vLLM has a valid max_model_len and enough batched tokens.
+        if cfg.actor_rollout_ref.rollout.get("max_model_len") is None:
+            cfg.actor_rollout_ref.rollout.max_model_len = (
+                cfg.data.max_prompt_length + cfg.data.max_response_length
+            )
+        if (
+            cfg.actor_rollout_ref.rollout.max_num_batched_tokens
+            < cfg.actor_rollout_ref.rollout.max_model_len
+        ):
+            cfg.actor_rollout_ref.rollout.max_num_batched_tokens = (
+                cfg.actor_rollout_ref.rollout.max_model_len
+            )
+
         # GRPO/GRPO-per-step 特定配置
         # grpo_per_step uses the same training framework as grpo, just with different advantage estimation
         if cfg.algorithm.adv_estimator in ("grpo", "grpo_per_step"):

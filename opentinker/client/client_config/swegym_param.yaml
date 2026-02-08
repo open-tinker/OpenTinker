@@ -1,0 +1,92 @@
+# SWE-Gym Training Configuration
+# Use with: python swegym_rl.py
+
+# Project settings
+project_name: opentinker
+experiment_name: swegym_training
+
+# Logging
+logger_backends: ["console", "wandb"]
+
+# Tracing (optional)
+enable_tracing: true
+weave_project: null
+
+# WandB (optional)
+wandb_key: null
+
+# Model and tokenizer
+tokenizer_path: null
+
+# Training parameters
+batch_size: 1
+num_workers: 2
+# Training duration - set ONE of these (num_steps takes precedence if both set)
+num_epochs: null
+num_steps: 500
+save_freq: 20000
+test_freq: 10
+
+# Validation parameters
+val_batch_size: 50
+
+# Generation parameters
+temperature: 1
+top_p: 1
+# Keep max_prompt_tokens + max_new_tokens <= model max_position_embeddings (131072)
+max_new_tokens: 8192
+max_prompt_tokens: 4096
+
+# Algorithm (must be agent_loop for multi-turn)
+algorithm: "agent_loop"
+
+# RL Algorithm settings
+adv_estimator: "grpo"
+rollout_n: 8
+
+# LoRA configuration (parameter-efficient fine-tuning)
+# Set lora_rank > 0 to enable LoRA training
+# Reference: verl/verl/trainer/config/model/hf_model.yaml
+lora:
+  lora_rank: 4
+  lora_alpha: 16
+  target_modules: "all-linear"
+  exclude_modules: null
+  lora_adapter_path: null
+
+# Interaction configuration
+interaction:
+  name: swegym
+  class_path: opentinker.environment.gym_environment_interaction.GymEnvironmentInteraction
+  config:
+    env_host: 0.0.0.0
+    env_port: 8090
+    env_endpoint: http://${interaction.config.env_host}:${interaction.config.env_port}
+    env_shards: 1
+    max_steps: 6
+    max_total_steps: 6
+    observation_template: "{observation}"
+
+    # SWE-Gym specific settings
+    dataset_name: "SWE-Gym/SWE-Gym"
+    split: "train"
+    repo_cache_dir: "/tmp/swegym/repos"
+    timeout_s: 60000
+    apply_test_patch: true
+    run_pass_to_pass: false
+    test_command: "pytest"
+
+multi_turn:
+  max_user_turns: ${interaction.config.max_total_steps}
+  max_assistant_turns: ${interaction.config.max_total_steps}
+  max_tokens_per_turn: 512
+  weave_project: "zsqzz/swegym-env-test"
+  experiment_name: "swegym_interaction"
+
+# Scheduler settings
+scheduler_url: "http://0.0.0.0:8780"
+scheduler_api_key: null
+
+# GPU settings
+num_gpus: 4
+

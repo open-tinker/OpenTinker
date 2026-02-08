@@ -22,7 +22,8 @@ def main(args):
     # 1. Submit job to scheduler
     scheduler_client = SchedulerClient(
         scheduler_url=args.get("scheduler_url", "http://localhost:8780"),
-        api_key=args.get("scheduler_api_key"),
+        #api_key=args.get("scheduler_api_key"),
+        api_key="otk_027be14b14d5257faee92a45cc30a611",
     )
 
     job_result = scheduler_client.submit_job(
