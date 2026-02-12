@@ -18,8 +18,8 @@ defaults:
   # load the reference default config, then apply the fields in the current yaml
   - _self_
 
-# Target class for this configuration
-_target_: verl.workers.config.FSDPActorConfig
+# Target class for this configuration (using patched version with distillation support)
+_target_: opentinker.backend_patch.verl.workers.config.actor.FSDPActorConfig
 
 # TODO(haibin.lin): switch to fsdp2
 strategy: fsdp

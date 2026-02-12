@@ -1,0 +1,86 @@
+# On-Policy Distillation Configuration
+# Use with: python distill_rl.py
+# Student: Qwen/Qwen2.5-0.5B-Instruct (actor/rollout)
+# Teacher: Qwen/Qwen2.5-3B-Instruct (ref policy)
+
+# Project settings
+project_name: opentinker
+experiment_name: onpolicy_distillation
+
+# Logging
+logger_backends: ["console", "wandb"]
+
+# Tracing (optional)
+enable_tracing: false
+weave_project: null
+
+# WandB (optional)
+wandb_key: null
+
+# Model and tokenizer (student model)
+tokenizer_path: Qwen/Qwen2.5-0.5B-Instruct
+
+# Data paths
+data_path: null # Path to training data (JSON/JSONL) - any math prompts will work
+val_data_path: null
+
+# Training parameters
+batch_size: 32
+num_workers: 0
+num_epochs: 10
+num_steps: null
+save_freq: 100
+test_freq: 5
+
+# Validation parameters
+val_batch_size: 50
+
+# Generation parameters
+temperature: 1.0    # Student rollout temperature
+top_p: 1
+max_new_tokens: 4096
+max_prompt_tokens: 2048
+
+# Algorithm (for batch structure compatibility, actual loss is distillation)
+algorithm: "single_turn"
+adv_estimator: "grpo"   # Required for batch structure but skipped in pure distillation
+rollout_n: 1             # Single sample per prompt for distillation
+
+# Distillation settings
+distillation:
+  use_distillation: true
+  distillation_mode: "pure"          # pure = KL loss only, no reward
+  distillation_kl_type: "reverse"    # forward = KL(teacher || student), reverse = KL(student || teacher)
+  teacher_model_path: Qwen/Qwen2.5-3B-Instruct
+
+# LoRA configuration (optional)
+lora:
+  lora_rank: 0
+  lora_alpha: 16
+  target_modules: "all-linear"
+  exclude_modules: null
+  lora_adapter_path: null
+
+# Interaction configuration
+interaction:
+  name: distill
+  class_path: opentinker.environment.gym_environment_interaction.GymEnvironmentInteraction
+  config:
+    env_host: 0.0.0.0
+    env_port: 8088
+    env_endpoint: http://${interaction.config.env_host}:${interaction.config.env_port}
+    max_steps: 1
+
+multi_turn:
+  max_user_turns: 0
+  max_assistant_turns: 1
+  max_tokens_per_turn: 2048
+  weave_project: null
+  experiment_name: "distill_interaction"
+
+# Scheduler settings
+scheduler_url: "http://0.0.0.0:8780"
+scheduler_api_key: otk_98b8db24ccd64c92e1fdd9a232e209fa
+
+# GPU settings
+num_gpus: 4

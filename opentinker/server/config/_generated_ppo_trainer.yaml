@@ -41,7 +41,7 @@ actor_rollout_ref:
       entropy_checkpointing: false
       forward_only: false
       strategy: fsdp
-    _target_: verl.workers.config.FSDPActorConfig
+    _target_: opentinker.backend_patch.verl.workers.config.actor.FSDPActorConfig
     strategy: fsdp
     ppo_mini_batch_size: 256
     ppo_micro_batch_size: null

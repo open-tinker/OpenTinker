@@ -426,7 +426,8 @@ def build_role_worker_mapping(config):
     # Actor rollout - based on strategy
     if config.actor_rollout_ref.hybrid_engine:
         if config.actor_rollout_ref.actor.strategy in {"fsdp", "fsdp2"}:
-            from verl.workers.fsdp_workers import (
+            # Use patched workers with distillation support
+            from opentinker.backend_patch.verl.workers.fsdp_workers import (
                 ActorRolloutRefWorker,
                 AsyncActorRolloutRefWorker,
             )
@@ -480,13 +481,17 @@ def build_role_worker_mapping(config):
     else:
         print(f"✗ Critic not needed (adv_estimator={config.algorithm.adv_estimator})")
 
-    # Reference policy (if KL loss or KL reward is used)
+    # Reference policy (if KL loss, KL reward, or distillation is used)
+    use_distillation = config.actor_rollout_ref.actor.get("use_distillation", False)
     if hasattr(config, "algorithm") and (
-        config.algorithm.use_kl_in_reward or config.actor_rollout_ref.actor.use_kl_loss
+        config.algorithm.use_kl_in_reward
+        or config.actor_rollout_ref.actor.use_kl_loss
+        or use_distillation
     ):
         # Use the same actor rollout class for reference policy
         if config.actor_rollout_ref.actor.strategy in {"fsdp", "fsdp2"}:
-            from verl.workers.fsdp_workers import ActorRolloutRefWorker
+            # Use patched workers with distillation support
+            from opentinker.backend_patch.verl.workers.fsdp_workers import ActorRolloutRefWorker
         elif config.actor_rollout_ref.actor.strategy == "megatron":
             from verl.workers.megatron_workers import ActorRolloutRefWorker
         else:
@@ -495,7 +500,8 @@ def build_role_worker_mapping(config):
             )
 
         role_worker_mapping[Role.RefPolicy] = ray.remote(ActorRolloutRefWorker)
-        print("✓ RefPolicy worker added to role_worker_mapping")
+        reason = "distillation" if use_distillation else "KL loss/reward"
+        print(f"✓ RefPolicy worker added to role_worker_mapping (reason: {reason})")
 
     # Reward model
     if config.reward_model.enable:
@@ -656,6 +662,13 @@ class PPOTrainingServerBackend:
         self.use_rm = self.trainer.use_rm
         self.ref_in_actor = self.trainer.ref_in_actor
         self.async_rollout_mode = False  # Will be set after init_workers
+
+        # Distillation config
+        self.use_distillation = config.actor_rollout_ref.actor.get("use_distillation", False)
+        self.distillation_mode = config.actor_rollout_ref.actor.get("distillation_mode", "pure")
+        if self.use_distillation:
+            logger.info(f"[Distillation] Enabled: mode={self.distillation_mode}")
+            logger.info(f"[Distillation] use_reference_policy={self.use_reference_policy}")
 
         # KL control
         if self.config.algorithm.use_kl_in_reward:
@@ -925,19 +938,18 @@ class PPOTrainingServerBackend:
                     del rm_scores, gen_baseline_batch, gen_baseline_output
 
             # 3. Merge original batch and generated output
-            # repeat to align with repeated responses in rollout
-            # GRPO FIX: Add uid BEFORE repeat so responses from same prompt share uid
-            if "uid" not in batch.non_tensor_batch:
-                import uuid
-
-                batch.non_tensor_batch["uid"] = np.array(
-                    [str(uuid.uuid4()) for _ in range(len(batch))], dtype=object
-                )
+            # gen_batch_output already has uid and is repeated by _generate_sequences
+            # We need to repeat batch to match dimensions, but NOT add a different uid
             if self.config.actor_rollout_ref.rollout.n > 1:
                 batch = batch.repeat(
                     repeat_times=self.config.actor_rollout_ref.rollout.n,
                     interleave=True,
                 )
+            # Remove uid from gen_batch_output before union to avoid conflict
+            # (uid was added in _generate_sequences for internal use)
+            if "uid" in gen_batch_output.non_tensor_batch:
+                # Transfer uid from gen_batch_output to batch
+                batch.non_tensor_batch["uid"] = gen_batch_output.non_tensor_batch.pop("uid")
             batch = batch.union(gen_batch_output)
             logger.info(
                 f"DEBUG: batch keys after gen union: {list(batch.batch.keys())}"
@@ -959,21 +971,27 @@ class PPOTrainingServerBackend:
                 batch.batch["attention_mask"], dim=-1
             ).tolist()
 
-            # 5. Compute reward
-            with marked_timer("reward", timing_raw, color="yellow"):
-                if self.use_rm and "rm_scores" not in batch.batch.keys():
-                    reward_tensor = self.rm_wg.compute_rm_score(batch)
-                    batch = batch.union(reward_tensor)
+            # 5. Compute reward (skip in pure distillation mode)
+            if self.use_distillation and self.distillation_mode == "pure":
+                # Pure distillation: skip reward computation entirely
+                reward_tensor = None
+                reward_extra_infos_dict = {}
+                logger.info("[Distillation] Pure mode: skipped reward computation")
+            else:
+                with marked_timer("reward", timing_raw, color="yellow"):
+                    if self.use_rm and "rm_scores" not in batch.batch.keys():
+                        reward_tensor = self.rm_wg.compute_rm_score(batch)
+                        batch = batch.union(reward_tensor)
 
-                # Support async reward computation if configured
-                if self.config.reward_model.launch_reward_fn_async:
-                    future_reward = compute_reward_async.remote(
-                        data=batch, config=self.config, tokenizer=self.tokenizer
-                    )
-                else:
-                    reward_tensor, reward_extra_infos_dict = compute_reward(
-                        batch, self.reward_fn
-                    )
+                    # Support async reward computation if configured
+                    if self.config.reward_model.launch_reward_fn_async:
+                        future_reward = compute_reward_async.remote(
+                            data=batch, config=self.config, tokenizer=self.tokenizer
+                        )
+                    else:
+                        reward_tensor, reward_extra_infos_dict = compute_reward(
+                            batch, self.reward_fn
+                        )
 
             # 6. Compute old_log_probs
             with marked_timer("old_log_prob", timing_raw, color="blue"):
@@ -1051,7 +1069,7 @@ class PPOTrainingServerBackend:
 
                     metrics.update(calculate_debug_metrics(batch))
 
-            # 7. Compute ref_log_prob if needed
+            # 7. Compute ref_log_prob if needed (also used for teacher in distillation)
             if self.use_reference_policy:
                 with marked_timer("ref_log_prob", timing_raw, color="olive"):
                     if not self.ref_in_actor:
@@ -1060,65 +1078,96 @@ class PPOTrainingServerBackend:
                         ref_log_prob = self.actor_rollout_wg.compute_ref_log_prob(batch)
                     batch = batch.union(ref_log_prob)
 
-            # 8. Compute values if using critic
-            if self.use_critic:
-                with marked_timer("values", timing_raw, color="cyan"):
-                    values = self.critic_wg.compute_values(batch)
-                    batch = batch.union(values)
+                    # For distillation, alias ref_log_prob as teacher_log_probs
+                    if self.use_distillation:
+                        batch.batch["teacher_log_probs"] = batch.batch["ref_log_prob"]
+                        logger.info(
+                            f"[Distillation] teacher_log_probs computed via ref_policy, "
+                            f"shape={batch.batch['teacher_log_probs'].shape}"
+                        )
 
-            # 9. Compute advantage
-            with marked_timer("adv", timing_raw, color="brown"):
-                # Handle async reward if configured
-                reward_extra_infos_dict: dict[str, list]
-                if self.config.reward_model.launch_reward_fn_async:
-                    import ray
+            # ===== DISTILLATION PATH: skip reward/advantage for pure distillation =====
+            if self.use_distillation and self.distillation_mode == "pure":
+                # Pure distillation: no reward signal, no advantage computation
+                # Set dummy tensors so batch structure is well-formed for update_actor
+                response_mask = batch.batch["response_mask"]
+                batch.batch["token_level_scores"] = torch.zeros_like(
+                    response_mask, dtype=torch.float32
+                )
+                batch.batch["token_level_rewards"] = torch.zeros_like(
+                    response_mask, dtype=torch.float32
+                )
+                batch.batch["advantages"] = torch.zeros_like(
+                    response_mask, dtype=torch.float32
+                )
+                batch.batch["returns"] = torch.zeros_like(
+                    response_mask, dtype=torch.float32
+                )
+                reward_tensor = batch.batch["token_level_scores"]
+                reward_extra_infos_dict = {}
+                metrics["training_step_reward"] = 0.0
+                logger.info("[Distillation] Pure mode: skipped reward & advantage computation")
+            else:
+                # ===== STANDARD RL PATH (unchanged) =====
+                # 8. Compute values if using critic
+                if self.use_critic:
+                    with marked_timer("values", timing_raw, color="cyan"):
+                        values = self.critic_wg.compute_values(batch)
+                        batch = batch.union(values)
 
-                    reward_tensor, reward_extra_infos_dict = ray.get(future_reward)
+                # 9. Compute advantage
+                with marked_timer("adv", timing_raw, color="brown"):
+                    # Handle async reward if configured
+                    reward_extra_infos_dict: dict[str, list]
+                    if self.config.reward_model.launch_reward_fn_async:
+                        import ray
 
-                batch.batch["token_level_scores"] = reward_tensor
-                scores = reward_tensor.sum(-1).cpu().tolist()
-                metrics["training_step_reward"] = np.mean(scores)
+                        reward_tensor, reward_extra_infos_dict = ray.get(future_reward)
 
-                # Add reward_extra_infos to batch non_tensor_batch
-                if reward_extra_infos_dict:
-                    batch.non_tensor_batch.update(
-                        {k: np.array(v) for k, v in reward_extra_infos_dict.items()}
+                    batch.batch["token_level_scores"] = reward_tensor
+                    scores = reward_tensor.sum(-1).cpu().tolist()
+                    metrics["training_step_reward"] = np.mean(scores)
+
+                    # Add reward_extra_infos to batch non_tensor_batch
+                    if reward_extra_infos_dict:
+                        batch.non_tensor_batch.update(
+                            {k: np.array(v) for k, v in reward_extra_infos_dict.items()}
+                        )
+
+                    # Apply KL penalty if configured
+                    if self.config.algorithm.use_kl_in_reward:
+                        batch, kl_metrics = apply_kl_penalty(
+                            batch,
+                            kl_ctrl=self.kl_ctrl_in_reward,
+                            kl_penalty=self.config.algorithm.kl_penalty,
+                        )
+                        metrics.update(kl_metrics)
+                    else:
+                        batch.batch["token_level_rewards"] = batch.batch[
+                            "token_level_scores"
+                        ]
+
+                    # Compute rollout importance sampling weights centrally (once per batch)
+                    # This corrects for mismatch between rollout policy and training policy
+                    # Also computes mismatch metrics (KL, PPL, etc.)
+                    batch, is_metrics = (
+                        self.compute_rollout_importance_weights_and_add_to_batch(batch)
                     )
+                    # IS and mismatch metrics already have mismatch/ prefix
+                    metrics.update(is_metrics)
 
-                # Apply KL penalty if configured
-                if self.config.algorithm.use_kl_in_reward:
-                    batch, kl_metrics = apply_kl_penalty(
+                    norm_adv_by_std_in_grpo = self.config.algorithm.get(
+                        "norm_adv_by_std_in_grpo", True
+                    )
+                    batch = compute_advantage(
                         batch,
-                        kl_ctrl=self.kl_ctrl_in_reward,
-                        kl_penalty=self.config.algorithm.kl_penalty,
+                        adv_estimator=self.config.algorithm.adv_estimator,
+                        gamma=self.config.algorithm.gamma,
+                        lam=self.config.algorithm.lam,
+                        num_repeat=self.config.actor_rollout_ref.rollout.n,
+                        norm_adv_by_std_in_grpo=norm_adv_by_std_in_grpo,
+                        config=self.config.algorithm,
                     )
-                    metrics.update(kl_metrics)
-                else:
-                    batch.batch["token_level_rewards"] = batch.batch[
-                        "token_level_scores"
-                    ]
-
-                # Compute rollout importance sampling weights centrally (once per batch)
-                # This corrects for mismatch between rollout policy and training policy
-                # Also computes mismatch metrics (KL, PPL, etc.)
-                batch, is_metrics = (
-                    self.compute_rollout_importance_weights_and_add_to_batch(batch)
-                )
-                # IS and mismatch metrics already have mismatch/ prefix
-                metrics.update(is_metrics)
-
-                norm_adv_by_std_in_grpo = self.config.algorithm.get(
-                    "norm_adv_by_std_in_grpo", True
-                )
-                batch = compute_advantage(
-                    batch,
-                    adv_estimator=self.config.algorithm.adv_estimator,
-                    gamma=self.config.algorithm.gamma,
-                    lam=self.config.algorithm.lam,
-                    num_repeat=self.config.actor_rollout_ref.rollout.n,
-                    norm_adv_by_std_in_grpo=norm_adv_by_std_in_grpo,
-                    config=self.config.algorithm,
-                )
 
             # 10. Update critic
             if self.use_critic:
@@ -1495,6 +1544,10 @@ class PPOTrainingServerBackend:
             # 6. Merge original batch and generated output
             batch = batch.union(gen_batch_output)
 
+            # 6.1 Compute response mask if not present
+            if "response_mask" not in batch.batch.keys():
+                batch.batch["response_mask"] = compute_response_mask(batch)
+
             # 7. Compute reward using validation reward function
             if self.val_reward_fn is None:
                 raise ValueError("val_reward_fn must be provided for validation.")
@@ -1586,6 +1639,232 @@ class PPOTrainingServerBackend:
 
             error_traceback = tb.format_exc()
             logger.error(f"Validation step failed: {e}")
+            logger.error(f"Traceback:\n{error_traceback}")
+            return {
+                "status": "error",
+                "metrics": {},
+                "samples": [],
+                "error": str(e),
+                "traceback": error_traceback,
+            }
+
+    def validate_step_distillation(self, batch: DataProto) -> Dict[str, Any]:
+        """
+        Execute one validation step for distillation mode.
+
+        Computes distillation metrics (KL divergence, cross-entropy) on validation data
+        instead of reward-based metrics.
+
+        Args:
+            batch: DataProto batch from validation dataloader
+
+        Returns:
+            Result dict with status, distillation metrics, and sample outputs
+        """
+        if not self.is_initialized:
+            raise RuntimeError("Server not initialized. Call init_workers() first.")
+
+        try:
+            # 1. Repeat batch based on val_kwargs.n if configured
+            val_n = self.config.actor_rollout_ref.rollout.val_kwargs.n
+            if val_n > 1:
+                batch = batch.repeat(repeat_times=val_n, interleave=True)
+
+            # 2. Prepare validation batch
+            gen_batch = self._prepare_val_batch(batch)
+
+            # 3. Pad batch to be divisible by dp_size
+            from verl.protocol import pad_dataproto_to_divisor, unpad_dataproto
+
+            size_divisor = (
+                self.actor_rollout_wg.world_size
+                if not self.async_rollout_mode
+                else self.config.actor_rollout_ref.rollout.agent.num_workers
+            )
+            gen_batch_padded, pad_size = pad_dataproto_to_divisor(
+                gen_batch, size_divisor
+            )
+
+            # 4. Generate sequences with student model
+            if not self.async_rollout_mode:
+                gen_batch_output_padded = self.actor_rollout_wg.generate_sequences(
+                    gen_batch_padded
+                )
+            else:
+                gen_batch_output_padded = self.async_rollout_manager.generate_sequences(
+                    gen_batch_padded
+                )
+
+            # 5. Unpad the output
+            gen_batch_output = unpad_dataproto(
+                gen_batch_output_padded, pad_size=pad_size
+            )
+
+            # 6. Merge original batch and generated output
+            batch = batch.union(gen_batch_output)
+
+            # 6.1 Compute response mask if not present
+            if "response_mask" not in batch.batch.keys():
+                batch.batch["response_mask"] = compute_response_mask(batch)
+
+            # 7. Compute student log probs
+            batch.meta_info["micro_batch_size"] = (
+                self.config.actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu
+            )
+            batch.meta_info["temperature"] = self.config.actor_rollout_ref.rollout.temperature
+            batch.meta_info["max_token_len"] = (
+                self.config.actor_rollout_ref.actor.ppo_max_token_len_per_gpu
+            )
+            batch.meta_info["use_dynamic_bsz"] = (
+                self.config.actor_rollout_ref.actor.use_dynamic_bsz
+            )
+
+            # Pad combined batch to ensure world_size divisibility for worker group calls
+            batch_padded, pad_size = pad_dataproto_to_divisor(batch, size_divisor)
+
+            with torch.no_grad():
+                # Call worker group with padded batch
+                student_output_padded = self.actor_rollout_wg.compute_log_prob(batch_padded)
+                
+                # Unpad the output DataProto
+                student_output = unpad_dataproto(student_output_padded, pad_size)
+                # Recover student log probs from DataProto
+                student_log_probs = student_output.batch["old_log_probs"]
+                # student_entropy = student_output.batch["entropys"] # currently not used
+                
+                batch.batch["old_log_probs"] = student_log_probs
+
+            # 8. Compute teacher log probs
+            if self.use_reference_policy:
+                if not self.ref_in_actor:
+                    ref_output_padded = self.ref_policy_wg.compute_ref_log_prob(batch_padded)
+                else:
+                    ref_output_padded = self.actor_rollout_wg.compute_ref_log_prob(batch_padded)
+                
+                # Unpad the output DataProto
+                ref_output = unpad_dataproto(ref_output_padded, pad_size)
+                batch = batch.union(ref_output)
+                teacher_log_probs = batch.batch["ref_log_prob"]
+            else:
+                raise RuntimeError("Distillation validation requires reference policy (teacher model)")
+
+            # 9. Compute distillation metrics
+            response_mask = batch.batch["response_mask"]
+            valid_tokens = response_mask.sum()
+
+            # Forward KL: KL(teacher || student) = Σ p_teacher * (log p_teacher - log p_student)
+            teacher_probs = teacher_log_probs.exp()
+            forward_kl = teacher_probs * (teacher_log_probs - student_log_probs)
+            forward_kl = forward_kl.clamp(min=0.0)
+            forward_kl_per_token = (forward_kl * response_mask).sum() / valid_tokens.clamp(min=1)
+
+            # Reverse KL: KL(student || teacher) = Σ p_student * (log p_student - log p_teacher)
+            student_probs = student_log_probs.exp()
+            reverse_kl = student_probs * (student_log_probs - teacher_log_probs)
+            reverse_kl = reverse_kl.clamp(min=0.0)
+            reverse_kl_per_token = (reverse_kl * response_mask).sum() / valid_tokens.clamp(min=1)
+
+            # Cross-entropy metrics
+            student_log_prob_mean = (student_log_probs * response_mask).sum() / valid_tokens.clamp(min=1)
+            teacher_log_prob_mean = (teacher_log_probs * response_mask).sum() / valid_tokens.clamp(min=1)
+
+            # Entropy estimates: H ≈ -E[log p]
+            student_entropy_estimate = -student_log_prob_mean
+            teacher_entropy_estimate = -teacher_log_prob_mean
+
+            # Log prob difference
+            log_prob_diff = teacher_log_prob_mean - student_log_prob_mean
+
+            # 10. Aggregate distillation metrics
+            metrics = {
+                "val/distill/forward_kl": float(forward_kl_per_token.cpu().item()),
+                "val/distill/reverse_kl": float(reverse_kl_per_token.cpu().item()),
+                "val/distill/student_log_prob": float(student_log_prob_mean.cpu().item()),
+                "val/distill/teacher_log_prob": float(teacher_log_prob_mean.cpu().item()),
+                "val/distill/student_entropy": float(student_entropy_estimate.cpu().item()),
+                "val/distill/teacher_entropy": float(teacher_entropy_estimate.cpu().item()),
+                "val/distill/log_prob_diff": float(log_prob_diff.cpu().item()),
+                "val/distill/num_samples": int(batch.batch["responses"].shape[0]),
+                "val/distill/avg_response_len": float(response_mask.sum(-1).float().mean().cpu().item()),
+            }
+
+            # 11. Compute reward metrics if val_reward_fn is available
+            scores = None
+            if self.val_reward_fn is not None:
+                try:
+                    reward_result = self.val_reward_fn(batch, return_dict=True)
+                    reward_tensor = reward_result["reward_tensor"]
+                    scores = reward_tensor.sum(-1).cpu().tolist()
+
+                    # Add reward-based metrics
+                    metrics["val/mean_score"] = float(np.mean(scores))
+                    metrics["val/std_score"] = float(np.std(scores))
+                    metrics["val/max_score"] = float(np.max(scores))
+                    metrics["val/min_score"] = float(np.min(scores))
+
+                    # Add extra metrics from reward function
+                    if "reward_extra_info" in reward_result:
+                        for key, values in reward_result["reward_extra_info"].items():
+                            if isinstance(values, np.ndarray):
+                                values_array = values
+                            elif isinstance(values, list):
+                                values_array = np.array(values)
+                            else:
+                                continue
+
+                            if len(values_array) == 0:
+                                continue
+
+                            try:
+                                flat_values = values_array.flatten()
+                                if np.issubdtype(flat_values.dtype, np.number):
+                                    mean_value = float(np.mean(flat_values))
+                                    metrics[f"val/{key}"] = mean_value
+                            except (ValueError, TypeError) as e:
+                                logger.debug(f"Could not process validation metric {key}: {e}")
+                                continue
+
+                    logger.info(f"Reward validation: mean_score={metrics.get('val/mean_score', 'N/A')}")
+                except Exception as e:
+                    logger.warning(f"Failed to compute reward metrics: {e}")
+            else:
+                logger.info("val_reward_fn not available, skipping reward metrics")
+
+            # 12. Prepare sample outputs for logging
+            inputs = self.tokenizer.batch_decode(
+                batch.batch["prompts"], skip_special_tokens=True
+            )
+            outputs = self.tokenizer.batch_decode(
+                batch.batch["responses"], skip_special_tokens=True
+            )
+
+            # Per-sample KL for display
+            per_sample_forward_kl = (forward_kl * response_mask).sum(-1) / response_mask.sum(-1).clamp(min=1)
+
+            samples = []
+            for i in range(min(10, len(inputs))):  # Return top 10 samples
+                sample = {
+                    "input": inputs[i],
+                    "output": outputs[i],
+                    "forward_kl": float(per_sample_forward_kl[i].cpu().item()),
+                }
+                if scores is not None:
+                    sample["score"] = float(scores[i])
+                samples.append(sample)
+
+            logger.info(f"Distillation validation completed: {metrics}")
+
+            return {
+                "status": "success",
+                "metrics": metrics,
+                "samples": samples,
+            }
+
+        except Exception as e:
+            import traceback as tb
+
+            error_traceback = tb.format_exc()
+            logger.error(f"Distillation validation step failed: {e}")
             logger.error(f"Traceback:\n{error_traceback}")
             return {
                 "status": "error",
@@ -1819,10 +2098,16 @@ async def validate(request: ValidateRequest):
         # Deserialize validation batch
         val_batch = deserialize_dataproto(request.batch_data)
 
+        # Choose validation method based on distillation mode
+        if _training_server.use_distillation and _training_server.distillation_mode == "pure":
+            validate_fn = _training_server.validate_step_distillation
+        else:
+            validate_fn = _training_server.validate_step
+
         # Execute validation in thread pool to avoid asyncio event loop conflicts
         loop = asyncio.get_running_loop()
         result = await loop.run_in_executor(
-            _train_executor, _training_server.validate_step, val_batch
+            _train_executor, validate_fn, val_batch
         )
 
         return ValidateResponse(**result)
