@@ -950,9 +950,6 @@ class PPOTrainingServerBackend:
                     repeat_times=self.config.actor_rollout_ref.rollout.n,
                     interleave=True,
                 )
-            # Remove uid from gen_batch_output before union to avoid conflict
-            if "uid" in gen_batch_output.non_tensor_batch:
-                gen_batch_output.non_tensor_batch.pop("uid")
             batch = batch.union(gen_batch_output)
             logger.info(
                 f"DEBUG: batch keys after gen union: {list(batch.batch.keys())}"
@@ -1361,14 +1358,6 @@ class PPOTrainingServerBackend:
         Returns:
             Generated output
         """
-        # GRPO FIX: Add uid BEFORE repeat so responses from same prompt share uid
-        if "uid" not in gen_batch.non_tensor_batch:
-            import uuid
-
-            gen_batch.non_tensor_batch["uid"] = np.array(
-                [str(uuid.uuid4()) for _ in range(len(gen_batch))], dtype=object
-            )
-
         # Repeat batch if n > 1
         n = self.config.actor_rollout_ref.rollout.n
         if n > 1:
