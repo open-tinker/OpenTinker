@@ -938,18 +938,21 @@ class PPOTrainingServerBackend:
                     del rm_scores, gen_baseline_batch, gen_baseline_output
 
             # 3. Merge original batch and generated output
-            # gen_batch_output already has uid and is repeated by _generate_sequences
-            # We need to repeat batch to match dimensions, but NOT add a different uid
+            # GRPO FIX: Add uid BEFORE repeat so responses from same prompt share uid
+            if "uid" not in batch.non_tensor_batch:
+                import uuid
+
+                batch.non_tensor_batch["uid"] = np.array(
+                    [str(uuid.uuid4()) for _ in range(len(batch))], dtype=object
+                )
             if self.config.actor_rollout_ref.rollout.n > 1:
                 batch = batch.repeat(
                     repeat_times=self.config.actor_rollout_ref.rollout.n,
                     interleave=True,
                 )
             # Remove uid from gen_batch_output before union to avoid conflict
-            # (uid was added in _generate_sequences for internal use)
             if "uid" in gen_batch_output.non_tensor_batch:
-                # Transfer uid from gen_batch_output to batch
-                batch.non_tensor_batch["uid"] = gen_batch_output.non_tensor_batch.pop("uid")
+                gen_batch_output.non_tensor_batch.pop("uid")
             batch = batch.union(gen_batch_output)
             logger.info(
                 f"DEBUG: batch keys after gen union: {list(batch.batch.keys())}"
