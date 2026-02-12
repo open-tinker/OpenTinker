@@ -48,7 +48,7 @@ algorithm: "agent_loop"
 # adv_estimator: "grpo" or "gae" (for PPO)
 adv_estimator: "grpo"
 # rollout_n: number of samples per prompt for GRPO (only used when adv_estimator=grpo)
-rollout_n: 8
+rollout_n: 4
 
 # Multi-turn configuration
 multi_turn:
@@ -66,6 +66,7 @@ interaction:
     env_port: 8088
     env_endpoint: http://${interaction.config.env_host}:${interaction.config.env_port}
     max_steps: 5 # Max interaction steps (code executions)
+    observation_template: "{observation}"
 
 # Scheduler settings
 scheduler_url: "http://0.0.0.0:8780"

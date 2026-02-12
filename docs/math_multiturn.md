@@ -32,7 +32,7 @@ python opentinker/data_preprocess/math_multiturn_w_interaction.py \
 
 ```bash
 python opentinker/client/math_tool_rl.py \
-    tokenizer_path=Qwen/Qwen2.5-1.5B \
+    tokenizer_path=Qwen/Qwen2.5-3B-Instruct \
     batch_size=16 \
     val_batch_size=64 \
     data_path=data/math_agentloop/train.parquet \

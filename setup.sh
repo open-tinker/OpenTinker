@@ -20,9 +20,9 @@ python opentinker/client/distill_rl.py \
 
 
 python opentinker/client/math_tool_rl.py \
-    tokenizer_path=Qwen/Qwen2.5-1.5B \
-    batch_size=16 \
-    val_batch_size=64 \
+    tokenizer_path=Qwen/Qwen2.5-3B-Instruct \
+    batch_size=4 \
+    val_batch_size=16 \
     data_path=data/math_agentloop/train.parquet \
     val_data_path=data/math_agentloop/test.parquet \
     num_epochs=5 \
