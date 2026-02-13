@@ -100,6 +100,18 @@ class DataParallelPPOActor(BasePPOActor):
         if torch.distributed.get_rank() == 0 and self.use_distillation:
             print(f"[Distillation] Enabled: mode={self.distillation_mode}, kl_type={self.distillation_kl_type}")
 
+        # Self-distillation config (OPSD, arXiv:2601.18734)
+        self.use_self_distillation = self.config.get("use_self_distillation", False)
+        self.self_distillation_loss_type = self.config.get("self_distillation_loss_type", "jsd")
+        self.self_distillation_beta = self.config.get("self_distillation_beta", 0.5)
+        self.self_distillation_clip_advantage = self.config.get("self_distillation_clip_advantage", 0.0)
+
+        if torch.distributed.get_rank() == 0 and self.use_self_distillation:
+            print(
+                f"[SelfDistillation] Enabled: loss_type={self.self_distillation_loss_type}, "
+                f"beta={self.self_distillation_beta}"
+            )
+
     def _forward_micro_batch(
         self, micro_batch, temperature, calculate_entropy=False
     ) -> tuple[torch.Tensor, torch.Tensor]:
@@ -399,6 +411,10 @@ class DataParallelPPOActor(BasePPOActor):
         if self.use_distillation and "teacher_log_probs" in data.batch.keys():
             select_keys.append("teacher_log_probs")
 
+        # ===== SELF-DISTILLATION PATCH: include self-distill teacher_log_probs =====
+        if self.use_self_distillation and "self_distill_teacher_log_probs" in data.batch.keys():
+            select_keys.append("self_distill_teacher_log_probs")
+
         has_multi_modal_inputs = "multi_modal_inputs" in data.non_tensor_batch.keys()
         non_tensor_select_keys = ["multi_modal_inputs"] if has_multi_modal_inputs else []
 
@@ -496,6 +512,54 @@ class DataParallelPPOActor(BasePPOActor):
                         micro_batch_metrics["distillation/teacher_entropy"] = distill_metrics["teacher_entropy"].detach().item()
                         micro_batch_metrics["distillation/log_prob_diff"] = distill_metrics["log_prob_diff"].detach().item()
                         micro_batch_metrics["distillation/kl_type"] = 1.0 if self.distillation_kl_type == "forward" else 0.0
+
+                    elif self.use_self_distillation and "self_distill_teacher_log_probs" in model_inputs:
+                        # ===== SELF-DISTILLATION PATCH (OPSD, arXiv:2601.18734) =====
+                        # Same model as teacher+student, teacher conditioned on (x, y*)
+                        teacher_log_probs = model_inputs["self_distill_teacher_log_probs"]
+
+                        if self.self_distillation_loss_type == "jsd":
+                            from opentinker.self_distillation.loss import compute_jsd_loss
+                            sd_loss, sd_metrics = compute_jsd_loss(
+                                student_log_probs=log_prob,
+                                teacher_log_probs=teacher_log_probs,
+                                response_mask=response_mask,
+                                loss_agg_mode=loss_agg_mode,
+                                beta=self.self_distillation_beta,
+                                return_metrics=True,
+                            )
+                        elif self.self_distillation_loss_type == "sampled_token":
+                            from opentinker.self_distillation.loss import compute_sampled_token_loss
+                            sd_loss, sd_metrics = compute_sampled_token_loss(
+                                student_log_probs=log_prob,
+                                teacher_log_probs=teacher_log_probs,
+                                response_mask=response_mask,
+                                loss_agg_mode=loss_agg_mode,
+                                clip_advantage=self.self_distillation_clip_advantage,
+                                return_metrics=True,
+                            )
+                        else:
+                            raise ValueError(
+                                f"Unknown self_distillation_loss_type: {self.self_distillation_loss_type}"
+                            )
+
+                        policy_loss = sd_loss
+                        pg_loss = sd_loss
+                        pg_clipfrac = torch.tensor(0.0, device=log_prob.device)
+                        ppo_kl = torch.tensor(0.0, device=log_prob.device)
+                        pg_clipfrac_lower = torch.tensor(0.0, device=log_prob.device)
+
+                        # Add entropy regularization if configured
+                        if entropy_coeff != 0:
+                            entropy_loss = agg_loss(
+                                loss_mat=entropy, loss_mask=response_mask, loss_agg_mode=loss_agg_mode
+                            )
+                            policy_loss = policy_loss - entropy_loss * entropy_coeff
+
+                        # Record self-distillation metrics
+                        micro_batch_metrics["actor/self_distill_loss"] = sd_loss.detach().item() * loss_scale_factor
+                        for mk, mv in sd_metrics.items():
+                            micro_batch_metrics[f"self_distillation/{mk}"] = mv.detach().item()
 
                     else:
                         # ===== STANDARD RL PATH (unchanged from original) =====

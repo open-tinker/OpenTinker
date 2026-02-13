@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(git -C /mnt/disk1_from_server2/siqizhu4/OpenTinker show 7b1a1cc --stat)",
+      "WebFetch(domain:arxiv.org)",
+      "Bash(python -m pytest:*)"
+    ]
+  }
+}

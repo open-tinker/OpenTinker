@@ -253,6 +253,16 @@ class FSDPActorConfig(ActorConfig):
     distillation_mode: str = "pure"
     distillation_kl_type: str = "forward"
 
+    # ===== SELF-DISTILLATION PATCH (OPSD, arXiv:2601.18734) =====
+    # Single model acts as both teacher and student with different conditioning:
+    #   Student: p_S(.|x) — observes only the problem
+    #   Teacher: p_T(.|x,y*) — conditions on problem + ground-truth solution
+    use_self_distillation: bool = False
+    self_distillation_loss_type: str = "jsd"  # "jsd" or "sampled_token"
+    self_distillation_beta: float = 0.5       # JSD interpolation parameter
+    self_distillation_clip_advantage: float = 0.0  # Clip advantage for sampled_token loss
+    self_distillation_solution_template: str = "\n\nReference solution: {solution}\n\n After understanding the reference solution, please try to solve this problem using your own approach below:"
+
     def __post_init__(self):
         """Validate FSDP actor configuration parameters."""
         super().__post_init__()

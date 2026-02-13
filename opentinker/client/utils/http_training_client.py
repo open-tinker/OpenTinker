@@ -913,6 +913,17 @@ class ServiceClient:
 
             all_metrics.append(result["metrics"])
 
+            # Log validation samples for debugging
+            if "samples" in result and i == 0:
+                for j, s in enumerate(result["samples"][:3]):
+                    logger.info(
+                        f"[val sample {j}] score={s.get('score')} "
+                        f"gt={s.get('ground_truth', '?')} "
+                        f"ds={s.get('data_source', '?')}\n"
+                        f"  prompt (last 200 chars): ...{s.get('input', '')[-200:]}\n"
+                        f"  response (last 300 chars): ...{s.get('output', '')[-300:]}"
+                    )
+
         if not all_metrics:
             return {}
 

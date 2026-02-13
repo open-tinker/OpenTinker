@@ -256,6 +256,10 @@ class DynamicGameDataset(Dataset):
             "ground_truth": env_kwargs.get("ground_truth", ""),
         }
 
+        # Pass solution_text for self-distillation (OPSD) if available
+        if "solution_text" in sample:
+            row_dict["solution_text"] = sample["solution_text"]
+
         return row_dict
 
     def resume_dataset_state(self):

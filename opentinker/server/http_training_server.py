@@ -670,6 +670,15 @@ class PPOTrainingServerBackend:
             logger.info(f"[Distillation] Enabled: mode={self.distillation_mode}")
             logger.info(f"[Distillation] use_reference_policy={self.use_reference_policy}")
 
+        # Self-distillation config (OPSD, arXiv:2601.18734)
+        self.use_self_distillation = config.actor_rollout_ref.actor.get("use_self_distillation", False)
+        self.self_distillation_solution_template = config.actor_rollout_ref.actor.get(
+            "self_distillation_solution_template", "\n\nReference solution: {solution}\n\n After understanding the reference solution, please try to solve this problem using your own approach below:"
+        )
+        if self.use_self_distillation:
+            logger.info("[SelfDistillation] Enabled: single model as teacher+student")
+            logger.info(f"[SelfDistillation] solution_template={self.self_distillation_solution_template}")
+
         # KL control
         if self.config.algorithm.use_kl_in_reward:
             from verl.trainer.ppo import core_algos
@@ -895,6 +904,24 @@ class PPOTrainingServerBackend:
             metrics = {}
             timing_raw = {}
 
+            # 0. Save data needed for self-distillation before generation
+            # (generation prep pops raw_prompt and solution_text from batch)
+            saved_raw_prompts = None
+            saved_solution_texts = None
+            if self.use_self_distillation:
+                saved_raw_prompts = batch.non_tensor_batch.get("raw_prompt", None)
+                saved_solution_texts = batch.non_tensor_batch.get("solution_text", None)
+                if saved_solution_texts is None:
+                    # Fallback: use ground_truth as privileged solution
+                    rm_data = batch.non_tensor_batch.get("reward_model", None)
+                    if rm_data is not None:
+                        saved_solution_texts = np.array([
+                            str(rm.get("ground_truth", "")) if isinstance(rm, dict) else str(rm)
+                            for rm in rm_data
+                        ], dtype=object)
+                    else:
+                        logger.warning("[SelfDistillation] No solution_text or ground_truth found in batch")
+
             # 1. Prepare generation batch
             start_time = time.time()
             gen_batch = self._prepare_generation_batch(batch)
@@ -971,8 +998,12 @@ class PPOTrainingServerBackend:
                 batch.batch["attention_mask"], dim=-1
             ).tolist()
 
-            # 5. Compute reward (skip in pure distillation mode)
-            if self.use_distillation and self.distillation_mode == "pure":
+            # 5. Compute reward (skip in self-distillation or pure distillation mode)
+            if self.use_self_distillation:
+                reward_tensor = None
+                reward_extra_infos_dict = {}
+                logger.info("[SelfDistillation] Skipped reward computation")
+            elif self.use_distillation and self.distillation_mode == "pure":
                 # Pure distillation: skip reward computation entirely
                 reward_tensor = None
                 reward_extra_infos_dict = {}
@@ -1086,8 +1117,90 @@ class PPOTrainingServerBackend:
                             f"shape={batch.batch['teacher_log_probs'].shape}"
                         )
 
+            # ===== SELF-DISTILLATION PATH (OPSD): compute teacher log probs =====
+            # Paper (arXiv:2601.18734): "we fix the teacher policy to be the initial
+            # policy, rather than the currently updating learning policy, as we find
+            # this helps stabilize training and implicitly acts as regularization."
+            #
+            # For LoRA: the initial policy = base model without LoRA adapters.
+            # We use compute_ref_log_prob which disables LoRA adapters automatically.
+            if self.use_self_distillation and saved_solution_texts is not None:
+                with marked_timer("self_distill_teacher", timing_raw, color="magenta"):
+                    from opentinker.self_distillation.teacher_utils import construct_teacher_batch
+
+                    # Handle rollout_n > 1: repeat solution_texts to match batch size
+                    rollout_n = self.config.actor_rollout_ref.rollout.n
+                    if rollout_n > 1:
+                        expanded_solution_texts = []
+                        expanded_raw_prompts = [] if saved_raw_prompts is not None else None
+                        for i in range(len(saved_solution_texts)):
+                            for _ in range(rollout_n):
+                                expanded_solution_texts.append(saved_solution_texts[i])
+                                if expanded_raw_prompts is not None:
+                                    expanded_raw_prompts.append(saved_raw_prompts[i])
+                        current_solution_texts = expanded_solution_texts
+                        current_raw_prompts = np.array(expanded_raw_prompts, dtype=object) if expanded_raw_prompts else None
+                    else:
+                        current_solution_texts = list(saved_solution_texts)
+                        current_raw_prompts = saved_raw_prompts
+
+                    # Temporarily add raw_prompt to batch for teacher construction
+                    if current_raw_prompts is not None:
+                        batch.non_tensor_batch["raw_prompt"] = current_raw_prompts
+
+                    max_teacher_prompt_length = (
+                        self.config.data.max_prompt_length
+                        + self.config.data.get("max_solution_length", 512)
+                    )
+
+                    teacher_batch = construct_teacher_batch(
+                        batch=batch,
+                        tokenizer=self.tokenizer,
+                        solution_texts=current_solution_texts,
+                        max_teacher_prompt_length=max_teacher_prompt_length,
+                        solution_template=self.self_distillation_solution_template,
+                    )
+
+                    # Copy meta_info for compute_ref_log_prob
+                    teacher_batch.meta_info = batch.meta_info.copy()
+
+                    # Use FROZEN initial model (base model without LoRA) as teacher.
+                    # compute_ref_log_prob disables LoRA adapters, giving p_θ0(·|x, y*).
+                    teacher_log_prob_output = self.actor_rollout_wg.compute_ref_log_prob(teacher_batch)
+
+                    # Add teacher log probs to batch
+                    batch.batch["self_distill_teacher_log_probs"] = teacher_log_prob_output.batch["ref_log_prob"]
+
+                    # Clean up temporary raw_prompt
+                    batch.non_tensor_batch.pop("raw_prompt", None)
+
+                    logger.info(
+                        f"[SelfDistillation] teacher_log_probs computed via FROZEN initial model, "
+                        f"shape={batch.batch['self_distill_teacher_log_probs'].shape}"
+                    )
+
+            # ===== SELF-DISTILLATION PATH: skip reward/advantage =====
+            if self.use_self_distillation:
+                response_mask = batch.batch["response_mask"]
+                batch.batch["token_level_scores"] = torch.zeros_like(
+                    response_mask, dtype=torch.float32
+                )
+                batch.batch["token_level_rewards"] = torch.zeros_like(
+                    response_mask, dtype=torch.float32
+                )
+                batch.batch["advantages"] = torch.zeros_like(
+                    response_mask, dtype=torch.float32
+                )
+                batch.batch["returns"] = torch.zeros_like(
+                    response_mask, dtype=torch.float32
+                )
+                reward_tensor = batch.batch["token_level_scores"]
+                reward_extra_infos_dict = {}
+                metrics["training_step_reward"] = 0.0
+                logger.info("[SelfDistillation] Skipped reward & advantage computation")
+
             # ===== DISTILLATION PATH: skip reward/advantage for pure distillation =====
-            if self.use_distillation and self.distillation_mode == "pure":
+            elif self.use_distillation and self.distillation_mode == "pure":
                 # Pure distillation: no reward signal, no advantage computation
                 # Set dummy tensors so batch structure is well-formed for update_actor
                 response_mask = batch.batch["response_mask"]
@@ -1610,11 +1723,15 @@ class PPOTrainingServerBackend:
 
             samples = []
             for i in range(min(10, len(inputs))):  # Return top 10 samples
+                gt = batch[i].non_tensor_batch.get("reward_model", {}).get("ground_truth", "")
+                ds = batch[i].non_tensor_batch.get("data_source", "")
                 samples.append(
                     {
                         "input": inputs[i],
                         "output": outputs[i],
                         "score": float(scores[i]),
+                        "ground_truth": str(gt),
+                        "data_source": str(ds),
                     }
                 )
 

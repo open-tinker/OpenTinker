@@ -80,6 +80,7 @@ class StaticDatasetGenerator(AbstractGameDataGenerator):
         seed: Optional[int] = None,
         cache_dir: Optional[str] = None,
         system_prompt: Optional[str] = None,
+        solution_key: Optional[str] = None,
     ):
         # Normalize data_paths to list
         if isinstance(data_paths, str):
@@ -96,6 +97,8 @@ class StaticDatasetGenerator(AbstractGameDataGenerator):
         self.shuffle = shuffle
         self.seed = seed
         self.cache_dir = cache_dir or os.path.expanduser("~/.cache/verl/static_data")
+        # solution_key: field name for full solution text (for self-distillation)
+        self.solution_key = solution_key
 
         self.system_prompt = system_prompt
 
@@ -168,7 +171,15 @@ class StaticDatasetGenerator(AbstractGameDataGenerator):
         sample = self._samples[actual_idx]
 
         # Extract prompt (should be list of message dicts)
-        prompt = sample.get(self.prompt_key, [])
+        prompt = sample.get(self.prompt_key, None)
+        if prompt is None:
+            # Fallback: try common column names for prompt/question text
+            for alt_key in ("Problem", "problem", "question", "Question", "input"):
+                if alt_key in sample:
+                    prompt = sample[alt_key]
+                    break
+            else:
+                prompt = []
         if not isinstance(prompt, list):
             # If prompt is a string, wrap it in a message format
             prompt = [{"role": "user", "content": str(prompt)}]
@@ -194,6 +205,16 @@ class StaticDatasetGenerator(AbstractGameDataGenerator):
             and self.ground_truth_key in sample["extra_info"]
         ):
             env_kwargs["ground_truth"] = sample["extra_info"][self.ground_truth_key]
+        elif self.ground_truth_key:
+            # Fallback: try common column names for answer/ground truth
+            for alt_key in ("Answer", "answer", "expected_answer", "target"):
+                if alt_key in sample:
+                    env_kwargs["ground_truth"] = sample[alt_key]
+                    break
+
+        # Ensure ground_truth is always a string (some datasets store it as int)
+        if "ground_truth" in env_kwargs and not isinstance(env_kwargs["ground_truth"], str):
+            env_kwargs["ground_truth"] = str(env_kwargs["ground_truth"])
 
         for key in self.extra_keys:
             if key in sample:
@@ -214,12 +235,23 @@ class StaticDatasetGenerator(AbstractGameDataGenerator):
         # This is critical for correct reward function routing
         env_kwargs["data_source"] = data_source
 
+        # Extract solution text for self-distillation if configured
+        solution_text = None
+        if self.solution_key:
+            if self.solution_key in sample:
+                solution_text = str(sample[self.solution_key])
+            elif "reward_model" in sample and self.solution_key in sample.get("reward_model", {}):
+                solution_text = str(sample["reward_model"][self.solution_key])
+
         # data_source, solution_str, ground_truth, extra_info
-        return {
+        result = {
             "prompt": prompt,
             "env_kwargs": env_kwargs,
             "data_source": data_source,
         }
+        if solution_text is not None:
+            result["solution_text"] = solution_text
+        return result
 
     def get_interaction_name(self) -> str:
         """Return the interaction name for this data generator."""

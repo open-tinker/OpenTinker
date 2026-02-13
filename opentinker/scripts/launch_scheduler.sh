@@ -12,7 +12,7 @@ export ROLLOUT_TRACE_DIR="/workspace/logs"
 # export FLASHINFER_HOMOGENEOUS_MS=1
 
 # Default configuration
-AVAILABLE_GPUS="[6,7,8,9]"
+AVAILABLE_GPUS="[1,2,3,4]"
 PORT_RANGE="null"  # Set to null for auto-detection
 NUM_PORTS=200
 SCHEDULER_PORT=8780
