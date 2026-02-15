@@ -240,6 +240,8 @@ class StaticDatasetGenerator(AbstractGameDataGenerator):
         if self.solution_key:
             if self.solution_key in sample:
                 solution_text = str(sample[self.solution_key])
+            elif "extra_info" in sample and self.solution_key in sample.get("extra_info", {}):
+                solution_text = str(sample["extra_info"][self.solution_key])
             elif "reward_model" in sample and self.solution_key in sample.get("reward_model", {}):
                 solution_text = str(sample["reward_model"][self.solution_key])
 

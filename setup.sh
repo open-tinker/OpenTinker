@@ -66,3 +66,13 @@ python opentinker/client/self_distill_rl.py \
       val_data_path=./data/math/test.parquet \
       self_distillation.loss_type=sampled_token \
       self_distillation.beta=0.5
+
+python opentinker/client/self_distill_rl.py \
+      tokenizer_path=Qwen/Qwen3-8B \
+      data_path=data/math/train.parquet \
+      val_data_path=data/Maxwell-Jia/AIME_2024/aime_2024_unified.parquet \
+      num_epochs=2 \
+      batch_size=16 \
+      test_freq=10 \
+      num_gpus=4
+      # output_dir=/mnt/disk1_from_server2/siqizhu4/experiments/run1

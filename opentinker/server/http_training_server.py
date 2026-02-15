@@ -1377,12 +1377,33 @@ class PPOTrainingServerBackend:
                         logger.debug(f"Could not process reward metric {key}: {e}")
                         continue
 
+            # Prepare a few sample outputs for logging
+            train_sample_count = 3
+            inputs = self.tokenizer.batch_decode(
+                batch.batch["prompts"][:train_sample_count], skip_special_tokens=True
+            )
+            outputs = self.tokenizer.batch_decode(
+                batch.batch["responses"][:train_sample_count], skip_special_tokens=True
+            )
+            samples = []
+            for i in range(len(inputs)):
+                gt = batch[i].non_tensor_batch.get("reward_model", {}).get("ground_truth", "")
+                ds = batch[i].non_tensor_batch.get("data_source", "")
+                samples.append({
+                    "input": inputs[i],
+                    "output": outputs[i],
+                    "score": float(scores[i]),
+                    "ground_truth": str(gt),
+                    "data_source": str(ds),
+                })
+
             logger.info(f"Training step {self.global_steps} completed successfully")
 
             return {
                 "status": "success",
                 "metrics": metrics,
                 "global_steps": self.global_steps,
+                "samples": samples,
             }
 
         except Exception as e:
@@ -1722,7 +1743,7 @@ class PPOTrainingServerBackend:
             )
 
             samples = []
-            for i in range(min(10, len(inputs))):  # Return top 10 samples
+            for i in range(len(inputs)):
                 gt = batch[i].non_tensor_batch.get("reward_model", {}).get("ground_truth", "")
                 ds = batch[i].non_tensor_batch.get("data_source", "")
                 samples.append(

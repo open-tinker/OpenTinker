@@ -27,6 +27,7 @@ tokenizer_path: Qwen/Qwen2.5-7B-Instruct
 # Data paths
 data_path: null  # Path to training data (parquet/jsonl) with prompt + ground_truth
 val_data_path: null
+output_dir: null  # Directory for saving validation JSON files (null = Hydra's cwd)
 
 # Training parameters
 batch_size: 32
@@ -37,17 +38,7 @@ save_freq: 100
 test_freq: 5
 
 # Validation parameters
-val_batch_size: 32
-# System prompt for validation data. null = same as training (\boxed{} format).
-val_system_prompt: null
-# data_source for validation reward routing. Must match a key in verl's default_compute_score.
-# "DigitalLearningGmbH/MATH-lighteval" → math_reward (extracts \boxed{})
-# "math" → math_dapo (extracts Answer:)
-# null = use interaction_name ("math")
-val_data_source: "DigitalLearningGmbH/MATH-lighteval"
-# Column names for validation data (AIME: Problem/Answer, MATH: prompt/ground_truth)
-val_prompt_key: "Problem"
-val_ground_truth_key: "Answer"
+val_batch_size: 30
 
 # Generation parameters (for student rollouts)
 temperature: 1.2          # Paper uses 1.2
@@ -65,7 +56,7 @@ self_distillation:
   loss_type: "sampled_token"      # "sampled_token" (Eq.9 in paper, recommended) or "jsd" (per-token approx)
   beta: 0.5                       # JSD interpolation: 0.5 = symmetric JSD
   clip_advantage: 0.0             # Clip advantages for sampled_token loss (0 = no clipping)
-  solution_key: "Solution"    # Dataset field containing privileged solution text
+  solution_key: "answer"      # Field inside extra_info containing step-by-step solution
   solution_template: "\n\nReference solution: {solution}\n\n After understanding the reference solution, please try to solve this problem using your own approach below:"
   max_solution_length: 512        # Max tokens for solution text
 

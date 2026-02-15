@@ -97,6 +97,10 @@ def main(args):
     # 5. Set config with self-distillation overrides
     _set_self_distillation_config(client, args, env)
 
+    # 5.5. Set output directory for validation JSON files
+    if args.get("output_dir"):
+        client.set_output_dir(args.output_dir)
+
     # 6. Train
     print(
         f"Starting self-distillation: steps={args.get('num_steps')}, epochs={args.get('num_epochs')}"

@@ -88,30 +88,16 @@ class SelfDistillMathEnvironment(MathGameEnvironment):
         )
         print(f"Training dataloader: {len(self.train_dataloader)} batches (self-distillation)")
 
-        # Validation data generator (same as parent, no solution_key needed)
+        # Validation data generator (same keys as training after dataset unification)
         if self.val_data_paths:
-            # Use val_system_prompt if configured, otherwise fall back to training prompt
-            val_system_prompt = getattr(self.config, "val_system_prompt", None)
-            if not val_system_prompt:
-                val_system_prompt = math_game_for_prompt.get_system_prompt()
-
-            # val_data_source: controls reward function routing.
-            # Training data has its own data_source column (e.g. "DigitalLearningGmbH/MATH-lighteval")
-            # which routes to math_reward (boxed extraction). Validation data (e.g. AIME) often
-            # lacks this column, so we let the user specify it via config.
-            val_data_source = getattr(self.config, "val_data_source", None) or self.interaction_name
-
-            val_prompt_key = getattr(self.config, "val_prompt_key", "prompt")
-            val_ground_truth_key = getattr(self.config, "val_ground_truth_key", "ground_truth")
-
             val_generator = StaticDatasetGenerator(
                 data_paths=self.val_data_paths,
-                interaction_name=val_data_source,
-                prompt_key=val_prompt_key,
-                ground_truth_key=val_ground_truth_key,
+                interaction_name=self.interaction_name,
+                prompt_key="prompt",
+                ground_truth_key="ground_truth",
                 shuffle=False,
                 seed=42,
-                system_prompt=val_system_prompt,
+                system_prompt=math_game_for_prompt.get_system_prompt(),
             )
             val_batch_size = getattr(
                 self.config, "val_batch_size", min(64, len(val_generator))

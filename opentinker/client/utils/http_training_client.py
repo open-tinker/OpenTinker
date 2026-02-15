@@ -13,7 +13,9 @@
 # See the License for the specific language governing permissions.
 # limitations under the License.
 
+import json
 import logging
+import os
 import time
 from typing import Any, Dict, Iterator, List, Optional
 
@@ -572,6 +574,27 @@ class InferenceSchedulerClient:
         return response.json()
 
 
+def _log_samples(samples: List[Dict], tag: str, step: int, max_print: int = 3):
+    """Print per-sample info for training or validation.
+
+    Args:
+        samples: List of sample dicts with input/output/score/ground_truth.
+        tag: "train" or "val".
+        step: Current global step.
+        max_print: Max number of samples to print to log.
+    """
+    for i, s in enumerate(samples[:max_print]):
+        score = s.get("score", "?")
+        gt = s.get("ground_truth", "?")
+        prompt = s.get("input", "")
+        response = s.get("output", "")
+        logger.info(
+            f"[{tag} sample {i} | step {step}] score={score}, gt={gt}\n"
+            f"  prompt (last 200): ...{prompt[-200:]}\n"
+            f"  response (last 300): ...{response[-300:]}"
+        )
+
+
 class ServiceClient:
     def __init__(
         self,
@@ -582,6 +605,7 @@ class ServiceClient:
         **client_kwargs,
     ):
         self.client = HTTPTrainingClient(server_url, **client_kwargs)
+        self.output_dir = None  # set via set_output_dir() or auto-detect
 
         # Initialize tracking
         self.tracker = None
@@ -645,6 +669,17 @@ class ServiceClient:
         }
         self.client.set_generation_config(generation_config)
         self.client.set_config(server_cfg, env)
+
+    def set_output_dir(self, output_dir: str):
+        """Set the directory for saving validation JSON files."""
+        self.output_dir = output_dir
+
+    def _get_output_dir(self) -> str:
+        """Return output directory, auto-detecting Hydra's cwd if not set."""
+        if self.output_dir:
+            return self.output_dir
+        # Hydra changes cwd to outputs/<date>/<time>, so "." is already scoped
+        return os.getcwd()
 
     def upload_reward_function(self, function_name: str, source_code: str):
         """Upload custom reward function code to server."""
@@ -730,7 +765,7 @@ class ServiceClient:
         # 4. Run validation before training if requested
         if validate_before_training and val_dataloader:
             logger.info("Running validation before training...")
-            val_metrics = self._run_validation(val_dataloader, game_stats_client)
+            val_metrics = self._run_validation(val_dataloader, game_stats_client, global_step=0)
             logger.info(f"Pre-training validation: {val_metrics}")
             if self.tracker:
                 self.tracker.log(val_metrics, step=0)
@@ -768,6 +803,10 @@ class ServiceClient:
 
                     global_steps = result["global_steps"]
                     last_metrics = result["metrics"]
+
+                    # Log training samples
+                    if "samples" in result:
+                        _log_samples(result["samples"], "train", global_steps)
 
                     # Fetch and log game stats (if game_stats_client provided)
                     if game_stats_client and global_steps % game_stats_log_freq == 0:
@@ -829,7 +868,7 @@ class ServiceClient:
                         and global_steps % test_freq == 0
                     ):
                         val_metrics = self._run_validation(
-                            val_dataloader, game_stats_client
+                            val_dataloader, game_stats_client, global_step=global_steps
                         )
                         logger.info(
                             f"Validation @ epoch {epoch + 1}, step {global_steps}: {val_metrics}"
@@ -863,7 +902,7 @@ class ServiceClient:
         # 6. Run final validation
         if val_dataloader:
             logger.info("Running final validation after training...")
-            val_metrics = self._run_validation(val_dataloader, game_stats_client)
+            val_metrics = self._run_validation(val_dataloader, game_stats_client, global_step=global_steps)
             logger.info(f"Final validation @ step {global_steps}: {val_metrics}")
             if self.tracker:
                 val_metrics_to_log = val_metrics.copy()
@@ -881,18 +920,21 @@ class ServiceClient:
         return last_metrics
 
     def _run_validation(
-        self, val_dataloader: Iterator, game_stats_client=None
+        self, val_dataloader: Iterator, game_stats_client=None,
+        global_step: int = 0,
     ) -> Dict[str, float]:
         """Run validation on all batches and aggregate metrics.
 
         Args:
             val_dataloader: Validation data iterator
             game_stats_client: Optional GameStatsClient for fetching game metrics
+            global_step: Current training step (for logging / file naming)
 
         Returns:
             Aggregated validation metrics including game stats if available
         """
         all_metrics = []
+        all_samples = []
 
         logger.info("Running validation...")
 
@@ -913,16 +955,24 @@ class ServiceClient:
 
             all_metrics.append(result["metrics"])
 
-            # Log validation samples for debugging
-            if "samples" in result and i == 0:
-                for j, s in enumerate(result["samples"][:3]):
-                    logger.info(
-                        f"[val sample {j}] score={s.get('score')} "
-                        f"gt={s.get('ground_truth', '?')} "
-                        f"ds={s.get('data_source', '?')}\n"
-                        f"  prompt (last 200 chars): ...{s.get('input', '')[-200:]}\n"
-                        f"  response (last 300 chars): ...{s.get('output', '')[-300:]}"
-                    )
+            if "samples" in result:
+                all_samples.extend(result["samples"])
+
+        # Print a few samples
+        if all_samples:
+            _log_samples(all_samples, "val", global_step)
+
+        # Save all validation samples to JSON
+        if all_samples:
+            output_dir = os.path.join(self._get_output_dir(), "validation")
+            os.makedirs(output_dir, exist_ok=True)
+            output_path = os.path.join(output_dir, f"val_step_{global_step}.json")
+            with open(output_path, "w", encoding="utf-8") as f:
+                json.dump(
+                    {"step": global_step, "samples": all_samples},
+                    f, ensure_ascii=False, indent=2,
+                )
+            logger.info(f"Saved {len(all_samples)} validation samples to {output_path}")
 
         if not all_metrics:
             return {}
