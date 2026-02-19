@@ -1037,6 +1037,8 @@ class JobSchedulerActor:
         env = os.environ.copy()
         # Set CUDA_VISIBLE_DEVICES to comma-separated list of GPU IDs
         env["CUDA_VISIBLE_DEVICES"] = ",".join(map(str, job.gpu_ids))
+        # Pass job_id to agent loop for per-client trace subdirectory isolation
+        env["ROLLOUT_TRACE_JOB_ID"] = job.job_id
 
         # Build command line arguments from config
         cmd = [
@@ -1077,6 +1079,29 @@ class JobSchedulerActor:
             logger.info(
                 f"Job {job.job_id}: Ignoring rollout_n={rollout_n} (not in GRPO mode)"
             )
+
+        # Forward KL divergence parameters from client config
+        kl_config = job.config.get("kl", {})
+        if kl_config:
+            use_kl_in_reward = kl_config.get("use_kl_in_reward")
+            if use_kl_in_reward is not None:
+                cmd.append(f"algorithm.use_kl_in_reward={str(use_kl_in_reward).lower()}")
+                logger.info(f"Job {job.job_id}: ✓ KL use_kl_in_reward={use_kl_in_reward}")
+
+            use_kl_loss = kl_config.get("use_kl_loss")
+            if use_kl_loss is not None:
+                cmd.append(f"actor_rollout_ref.actor.use_kl_loss={str(use_kl_loss).lower()}")
+                logger.info(f"Job {job.job_id}: ✓ KL use_kl_loss={use_kl_loss}")
+
+            kl_loss_coef = kl_config.get("kl_loss_coef")
+            if kl_loss_coef is not None:
+                cmd.append(f"actor_rollout_ref.actor.kl_loss_coef={kl_loss_coef}")
+                logger.info(f"Job {job.job_id}: ✓ KL kl_loss_coef={kl_loss_coef}")
+
+            kl_loss_type = kl_config.get("kl_loss_type")
+            if kl_loss_type is not None:
+                cmd.append(f"actor_rollout_ref.actor.kl_loss_type={kl_loss_type}")
+                logger.info(f"Job {job.job_id}: ✓ KL kl_loss_type={kl_loss_type}")
 
         # Forward LoRA parameters if enabled (lora_rank > 0)
         lora_config = job.config.get("lora", {})

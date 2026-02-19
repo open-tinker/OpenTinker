@@ -48,6 +48,8 @@ class MultiTurnConfig(BaseConfig):
         "max_tokens_per_turn",
         "weave_project",
         "experiment_name",
+        "per_turn_training",
+        "per_turn_reward_gamma",
     }
 
     enable: bool = False
@@ -67,6 +69,17 @@ class MultiTurnConfig(BaseConfig):
 
     # Per-turn token limit (optional, None = no limit)
     max_tokens_per_turn: Optional[int] = None
+
+    # Per-turn training mode: each interaction turn becomes a separate training sample
+    # instead of concatenating all turns into one long sequence. This avoids context
+    # length limits and aligns training context with inference context (each turn only
+    # sees system + latest observation, matching the generation-time context).
+    per_turn_training: bool = False
+
+    # Per-turn reward gamma: when > 0, use discounted cumulative returns instead of
+    # immediate rewards for per-turn training. Each turn's training reward becomes
+    # G_i = r_i + gamma * G_{i+1}, propagating final outcome signal backwards.
+    per_turn_reward_gamma: float = 0.0
 
     # Weave tracing (server-side)
     weave_project: Optional[str] = None

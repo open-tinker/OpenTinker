@@ -982,10 +982,15 @@ class RayPPOTrainer:
         # create async rollout manager and request scheduler
         self.async_rollout_mode = False
         if self.config.actor_rollout_ref.rollout.mode == "async":
-            from verl.experimental.agent_loop import AgentLoopManager
+            # Use PerTurnAgentLoopManager which supports expanding multi-turn rollouts
+            # into individual per-turn training samples (when per_turn_training=True).
+            # Falls back to standard behavior when per_turn_training is disabled.
+            from opentinker.backend_patch.verl.experimental.agent_loop.per_turn_agent_loop import (
+                PerTurnAgentLoopManager,
+            )
 
             self.async_rollout_mode = True
-            self.async_rollout_manager = AgentLoopManager(
+            self.async_rollout_manager = PerTurnAgentLoopManager(
                 config=self.config, worker_group=self.actor_rollout_wg, rm_wg=self.rm_wg
             )
 

@@ -6,14 +6,14 @@
 # export PATH=$CUDA_HOME/bin:$PATH
 # export LD_LIBRARY_PATH=$CUDA_HOME/lib64:$LD_LIBRARY_PATH
 
-export ROLLOUT_TRACE_DIR="$HOME/OpenTinker/traces"
+export ROLLOUT_TRACE_DIR="${ROLLOUT_TRACE_DIR:-./traces}"
 mkdir -p "$ROLLOUT_TRACE_DIR"
 # export NVCC_EXECUTABLE=$CUDA_HOME/bin/nvcc
 export TORCH_CUDA_ARCH_LIST="9.0"
 export FLASHINFER_HOMOGENEOUS_MS=1
 
 # Default configuration
-AVAILABLE_GPUS="[1,2,3,4]"
+AVAILABLE_GPUS="[0,1,2,3]"
 PORT_RANGE="null"  # Set to null for auto-detection
 NUM_PORTS=200
 SCHEDULER_PORT=8780

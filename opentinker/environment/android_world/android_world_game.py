@@ -11,12 +11,16 @@ import logging
 from opentinker.environment.base_game import AbstractGame, StepResult
 from opentinker.environment.android_world import prompts
 
+logger = logging.getLogger(__name__)
+
 # Ensure android_world is in path if it's in the current directory
 if os.path.exists("android_world"):
     sys.path.append(os.path.abspath("android_world"))
-os.environ["ADB_PATH"] = "/home/yixingc/android-sdk/platform-tools/adb"
-os.environ["ANDROID_CONSOLE_PORT"] = "5556"
-os.environ["ANDROID_GRPC_PORT"] = "8554"
+
+# Android emulator connection defaults (overridable via env vars)
+os.environ.setdefault("ADB_PATH", "adb")
+os.environ.setdefault("ANDROID_CONSOLE_PORT", "5556")
+os.environ.setdefault("ANDROID_GRPC_PORT", "8554")
 
 # AndroidWorld imports
 try:
@@ -30,7 +34,7 @@ try:
     ANDROID_WORLD_AVAILABLE = True
 except ImportError:
     ANDROID_WORLD_AVAILABLE = False
-    logging.warning("android_world not installed or not found.")
+    logger.warning("android_world not installed or not found.")
 
 
 class AndroidWorldGame(AbstractGame):
@@ -38,6 +42,9 @@ class AndroidWorldGame(AbstractGame):
 
     This implementation wraps the AndroidWorld environment for LLM RL training.
     It adopts the T3A agent's prompting and observation style.
+    
+    NOTE: All game instances share ONE emulator. A global lock serializes all
+    reset() and step() operations to prevent concurrent access conflicts.
     """
 
     # Reward constants
@@ -59,6 +66,10 @@ class AndroidWorldGame(AbstractGame):
 
     _cached_game_paths: Dict[str, List[str]] = {}
     _cache_lock = threading.Lock()
+    
+    # NOTE: No emulator lock needed - with PPO (rollout_n=1), operations are
+    # naturally serialized. The env server's asyncio lock handles any remaining
+    # concurrency at the HTTP level.
 
     def __init__(
         self,
@@ -68,14 +79,25 @@ class AndroidWorldGame(AbstractGame):
         split: str = "train",
         num_games: int = -1,
         use_shared_env: bool = False,
+        emulator_console_port: Optional[int] = None,
+        emulator_grpc_port: Optional[int] = None,
     ):
-        """Initialize AndroidWorld game."""
+        """Initialize AndroidWorld game.
+        
+        Args:
+            emulator_console_port: Emulator console port (default: from ANDROID_CONSOLE_PORT env or 5556)
+            emulator_grpc_port: Emulator gRPC port (default: from ANDROID_GRPC_PORT env or 8554)
+        """
         self.config_path = config_path
         self.max_steps = max_steps
         self.task_types = task_types or self.ALL_TASK_TYPES
         self.split = split
         self.num_games = num_games
         self._use_shared_env = use_shared_env
+        
+        # Emulator ports (can be set per-shard for multi-emulator support)
+        self._emulator_console_port = emulator_console_port
+        self._emulator_grpc_port = emulator_grpc_port
 
         # Game state
         self._env: Optional[interface.AsyncEnv] = None
@@ -85,7 +107,7 @@ class AndroidWorldGame(AbstractGame):
         self._task_desc = ""
         self._done = False
         self._initialized = False
-        self._history = [] # List of step summaries for T3A prompt
+        self._history = []  # List of step summaries for T3A prompt
 
     def _init_env(self):
         """Initialize AndroidWorld environment."""
@@ -94,9 +116,10 @@ class AndroidWorldGame(AbstractGame):
 
         if ANDROID_WORLD_AVAILABLE:
             adb_path = os.environ.get("ADB_PATH", None)
-            console_port = int(os.environ.get("ANDROID_CONSOLE_PORT", 5554))
-            grpc_port = int(os.environ.get("ANDROID_GRPC_PORT", 8554))
-            
+            # Use instance port if set, otherwise fall back to env var
+            console_port = self._emulator_console_port or int(os.environ.get("ANDROID_CONSOLE_PORT", 5556))
+            grpc_port = self._emulator_grpc_port or int(os.environ.get("ANDROID_GRPC_PORT", 8554))
+
             if not adb_path:
                 try:
                     from android_world.env import android_world_controller
@@ -104,7 +127,7 @@ class AndroidWorldGame(AbstractGame):
                 except ImportError:
                      adb_path = "adb"
 
-            print(f"[AndroidWorldGame] Initializing AndroidEnv (console_port={console_port}, grpc_port={grpc_port})...")
+            logger.info(f"Initializing AndroidEnv (console_port={console_port}, grpc_port={grpc_port})")
             try:
                 self._env = env_launcher.load_and_setup_env(
                     console_port=console_port,
@@ -114,11 +137,11 @@ class AndroidWorldGame(AbstractGame):
                     freeze_datetime=True
                 )
             except Exception as e:
-                logging.error(f"Failed to initialize AndroidWorld env: {e}")
-                logging.warning("Falling back to MOCK mode.")
+                logger.error(f"Failed to initialize AndroidWorld env: {e}")
+                logger.warning("Falling back to MOCK mode.")
                 self._env = None
         else:
-             print(f"[AndroidWorldGame] Running in MOCK mode (android_world not installed).")
+             logger.info("Running in MOCK mode (android_world not installed).")
         
         self._initialized = True
 
@@ -148,17 +171,17 @@ class AndroidWorldGame(AbstractGame):
                 all_tasks = task_registry.get_registry(registry.TaskRegistry.ANDROID_WORLD_FAMILY)
                 
                 if task_name not in all_tasks:
-                     logging.warning(f"Task {task_name} not found in registry. Using default.")
-                     task_class = all_tasks.get("ContactsAddContact")
+                    logger.warning(f"Task {task_name} not found in registry. Using default.")
+                    task_class = all_tasks.get("ContactsAddContact")
                 else:
-                     task_class = all_tasks[task_name]
+                    task_class = all_tasks[task_name]
 
                 params = task_class.generate_random_params()
                 if seed is not None:
                     params['seed'] = seed
                 
                 self._task = task_class(params)
-                print(f"[AndroidWorldGame] Resetting task: {self._task.name}")
+                logger.info(f"Resetting task: {self._task.name}")
                 
                 self._task.initialize_task(self._env)
                 self._env.hide_automation_ui()
@@ -168,15 +191,13 @@ class AndroidWorldGame(AbstractGame):
                 self._process_state(state)
                 
             except Exception as e:
-                logging.error(f"Failed to reset AndroidWorld task {task_name}: {e}")
-                import traceback
-                traceback.print_exc()
+                logger.error(f"Failed to reset AndroidWorld task {task_name}: {e}", exc_info=True)
                 self._set_mock_state(task_name)
         else:
             task_name = task_type or random.choice(self.task_types)
             self._set_mock_state(task_name)
 
-        return self._format_observation()
+        return self._format_observation(include_instructions=True)
 
     def _set_mock_state(self, task_name: str):
         """Set mock state for testing without the library."""
@@ -204,29 +225,46 @@ class AndroidWorldGame(AbstractGame):
         if hasattr(state, "ui_elements") and self._env:
             logical_screen_size = self._env.logical_screen_size
             elements_text = ""
+            valid_count = 0
             for index, ui_element in enumerate(state.ui_elements):
                 if self._validate_ui_element(ui_element, logical_screen_size):
                     # Use str(ui_element) which typically provides a good summary
                     elements_text += f"UI element {index}: {str(ui_element)}\n"
+                    valid_count += 1
             
+            logger.debug(f"_process_state: {len(state.ui_elements)} total elements, {valid_count} valid")
             self._current_obs = elements_text if elements_text else "No visible interactable elements."
         else:
             self._current_obs = "Screen updated (No UI elements info)"
 
-    def _format_observation(self, obs: Optional[str] = None) -> str:
-        """Format observation using T3A prompt template."""
+    def _format_observation(self, obs: Optional[str] = None, include_instructions: bool = False) -> str:
+        """Format observation using prompt template for agent loop.
+        
+        Args:
+            obs: Optional observation string. If None, uses self._current_obs.
+            include_instructions: If True, include PROMPT_PREFIX and GUIDANCE (for initial prompt).
+                                  If False, use simplified template (for subsequent turns).
+        """
         if obs is None:
             obs = self._current_obs
-            
-        history_str = '\n'.join(self._history) if self._history else 'You just started, no action has been performed yet.'
         
-        # We put everything in the user message/observation for the agent
-        return prompts.ACTION_SELECTION_PROMPT_TEMPLATE.format(
-            goal=self._task_desc,
-            history=history_str,
-            ui_elements_description=obs,
-            additional_guidelines="" 
-        )
+        if include_instructions or self._step_count == 0:
+            # Full template with PROMPT_PREFIX and GUIDANCE for initial prompt
+            history_str = '\n'.join(self._history) if self._history else 'You just started, no action has been performed yet.'
+        
+            # We put everything in the user message/observation for the agent
+            return prompts.INITIAL_ACTION_SELECTION_PROMPT_TEMPLATE.format(
+                goal=self._task_desc,
+                history=history_str,
+                ui_elements_description=obs,
+                additional_guidelines="" 
+            )
+        else:
+            # Simplified template: only goal and UI elements description for subsequent turns
+            return prompts.ACTION_SELECTION_PROMPT_TEMPLATE.format(
+                goal=self._task_desc,
+                ui_elements_description=obs,
+            )
 
     def step(self, action: str) -> StepResult:
         """Execute an action in the environment."""
@@ -251,47 +289,39 @@ class AndroidWorldGame(AbstractGame):
                         if env_action.action_type == 'status':
                             if env_action.goal_status == 'complete':
                                 reward = self.REWARD_SUCCESS
-                                self._done = True # Agent claims done
-                                # Check actual success
+                                self._done = True
                                 if self._task.is_successful(self._env) > 0.0:
-                                     step_summary = "Agent finished. Task Successful."
+                                    step_summary = "Agent finished. Task Successful."
                                 else:
-                                     reward = self.REWARD_FAILURE # Penalty for false positive
-                                     step_summary = "Agent finished. Task Failed (Condition not met)."
+                                    reward = self.REWARD_FAILURE
+                                    step_summary = "Agent finished. Task Failed (Condition not met)."
                             else:
                                 self._done = True
                                 reward = self.REWARD_FAILURE
                                 step_summary = "Agent declared task infeasible."
                         
                         elif env_action.action_type == 'answer':
-                             step_summary = f"Agent answered: {env_action.text}"
-                             # Check success immediately for answer tasks? 
-                             # Usually answer tasks require status=complete after answering.
-                             # We'll just execute it.
-                             pass
+                            step_summary = f"Agent answered: {env_action.text}"
                         
                         else:
                             # Execute physical action
                             self._env.execute_action(env_action)
                             state = self._env.get_state(wait_to_stabilize=True)
                             self._process_state(state)
-                            step_summary = f"Executed {env_action.action_type}. {reason[:50]}..."
-                            
-                            # Check success implicitly if task doesn't require status=complete?
-                            # T3A usually requires explicit status=complete. 
-                            # But we can check soft success for reward shaping if needed.
+                            reason_str = reason[:50] if reason else ""
+                            step_summary = f"Executed {env_action.action_type}. {reason_str}..."
                     else:
                         reward = self.REWARD_INVALID_ACTION
                         step_summary = "Invalid JSON action format."
                 except Exception as e:
-                    logging.error(f"Error executing action: {e}")
+                    logger.error(f"Error executing action: {e}", exc_info=True)
                     reward = self.REWARD_INVALID_ACTION
                     step_summary = f"Execution error: {str(e)}"
             else:
                 reward = self.REWARD_INVALID_ACTION
                 step_summary = "Could not parse Action JSON."
         else:
-            # Mock
+            # Mock mode
             step_summary = f"Mock execute: {action}"
             self._current_obs = "Screen updated."
 
@@ -332,20 +362,43 @@ class AndroidWorldGame(AbstractGame):
 
     def _parse_json_to_env_action(self, json_str: str) -> Any:
         """Convert JSON string to AndroidWorld JSONAction."""
+        # Clean up json_str - extract just the first dict/JSON object
+        # The string may contain extra text like "Your Answer:" after the JSON
+        
+        # First, try to find a complete JSON object with double quotes
+        json_match = re.search(r'\{[^{}]*"action_type"[^{}]*\}', json_str)
+        if json_match:
+            try:
+                action_dict = json.loads(json_match.group())
+                if isinstance(action_dict, dict):
+                    return json_action.JSONAction(**action_dict)
+            except (json.JSONDecodeError, TypeError):
+                pass
+        
+        # Try to find a complete dict with single quotes (Python style)
+        dict_match = re.search(r"\{[^{}]*'action_type'[^{}]*\}", json_str)
+        if dict_match:
+            try:
+                action_dict = ast.literal_eval(dict_match.group())
+                if isinstance(action_dict, dict):
+                    return json_action.JSONAction(**action_dict)
+            except (ValueError, SyntaxError, TypeError):
+                pass
+        
+        # Fallback: try parsing the whole string
         try:
-            # Try parsing
             action_dict = json.loads(json_str)
+            if isinstance(action_dict, dict):
+                return json_action.JSONAction(**action_dict)
         except json.JSONDecodeError:
             try:
-                # Try ast literal eval for single quotes
                 action_dict = ast.literal_eval(json_str)
+                if isinstance(action_dict, dict):
+                    return json_action.JSONAction(**action_dict)
             except:
-                return None
+                pass
         
-        if not isinstance(action_dict, dict):
-            return None
-            
-        return json_action.JSONAction(**action_dict)
+        return None
 
     def get_system_prompt(self) -> str:
         """Return the system prompt."""
@@ -356,7 +409,7 @@ class AndroidWorldGame(AbstractGame):
     def get_initial_user_message(self) -> str:
         """Return the initial user message."""
         # Used if environment is already reset
-        return self._format_observation()
+        return self._format_observation(include_instructions=True)
 
     def get_state(self) -> Dict[str, Any]:
         """Return the current game state."""
@@ -379,9 +432,62 @@ class AndroidWorldGame(AbstractGame):
     def get_user_message_with_state(
         self, task_type: Optional[str] = None, **kwargs
     ) -> str:
-        """Generate a user message with the rendered initial state for the prompt."""
-        # This calls reset and returns the first formatted observation (which is the full prompt)
-        return self.reset(task_type=task_type, **kwargs)
+        """Generate a user message with the rendered initial state for the prompt.
+        
+        NOTE: This is called by Client (DataLoader) to generate the initial prompt.
+        We do NOT call reset() here because:
+        1. Server will call reset() again via start_interaction() -> /reset
+        2. Both would operate the same Android emulator, causing conflicts
+        
+        Instead, we return a properly formatted prompt with placeholder UI elements.
+        The real reset() and UI elements come from Server's /reset call.
+        """
+        task_name = task_type or "ContactsAddContact"
+        seed = kwargs.get("seed")
+        
+        # Generate task goal based on task type (same logic as in reset)
+        # This ensures consistency between client prompt and server reset
+        if ANDROID_WORLD_AVAILABLE:
+            try:
+                task_registry = registry.TaskRegistry()
+                all_tasks = task_registry.get_registry(registry.TaskRegistry.ANDROID_WORLD_FAMILY)
+                if task_name in all_tasks:
+                    task_class = all_tasks[task_name]
+                    params = task_class.generate_random_params()
+                    if seed is not None:
+                        params['seed'] = seed
+                    temp_task = task_class(params)
+                    goal = temp_task.goal
+                else:
+                    goal = f"Complete the {task_name} task."
+            except Exception:
+                goal = f"Complete the {task_name} task."
+        else:
+            goal = f"Complete the {task_name} task."
+        
+        # Return formatted prompt with real Home Screen UI elements
+        # All AndroidWorld tasks start from Home Screen (go_home=True in reset)
+        # This UI is consistent across all tasks, so we can hardcode it
+        home_screen_ui = (
+            "UI element 0: UIElement(text=None, content_description=None, class_name='android.widget.ScrollView', is_clickable=False, is_scrollable=True, is_visible=True, package_name='com.google.android.apps.nexuslauncher')\n"
+            "UI element 1: UIElement(text=None, content_description='Home', class_name='android.view.View', is_clickable=False, is_visible=True, package_name='com.google.android.apps.nexuslauncher')\n"
+            "UI element 2: UIElement(text='Phone', content_description='Phone', class_name='android.widget.TextView', is_clickable=True, is_visible=True, package_name='com.google.android.apps.nexuslauncher')\n"
+            "UI element 3: UIElement(text='Messages', content_description='Messages', class_name='android.widget.TextView', is_clickable=True, is_visible=True, package_name='com.google.android.apps.nexuslauncher')\n"
+            "UI element 4: UIElement(text='Chrome', content_description='Chrome', class_name='android.widget.TextView', is_clickable=True, is_visible=True, package_name='com.google.android.apps.nexuslauncher')\n"
+            "UI element 5: UIElement(text='Gmail', content_description='Gmail', class_name='android.widget.TextView', is_clickable=True, is_visible=True, package_name='com.google.android.apps.nexuslauncher')\n"
+            "UI element 6: UIElement(text=None, content_description='Search', class_name='android.widget.FrameLayout', is_clickable=True, is_visible=True, package_name='com.google.android.apps.nexuslauncher')\n"
+            "UI element 7: UIElement(text='Photos', content_description='Photos', class_name='android.widget.TextView', is_clickable=True, is_visible=True, package_name='com.google.android.apps.nexuslauncher')\n"
+            "UI element 8: UIElement(text='YouTube', content_description='YouTube', class_name='android.widget.TextView', is_clickable=True, is_visible=True, package_name='com.google.android.apps.nexuslauncher')\n"
+            "UI element 9: UIElement(text=None, content_description='Google app', class_name='android.widget.ImageView', is_clickable=True, is_visible=True, package_name='com.google.android.apps.nexuslauncher')\n"
+        )
+        history = "You just started, no action has been performed yet."
+        
+        return prompts.INITIAL_ACTION_SELECTION_PROMPT_TEMPLATE.format(
+            goal=goal,
+            history=history,
+            ui_elements_description=home_screen_ui,
+            additional_guidelines=""
+        )
 
     def get_interaction_name(self) -> str:
         """Return the interaction name."""

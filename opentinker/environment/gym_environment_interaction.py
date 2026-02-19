@@ -22,8 +22,11 @@ environments. It implements the BaseInteraction interface and handles:
 The environment can be either local (imported directly) or remote (via HTTP API).
 """
 
+import asyncio
 import logging
 import os
+import re
+import threading
 import zlib
 from urllib.parse import urlparse, urlunparse
 from typing import Any, Optional, Callable
@@ -33,8 +36,20 @@ import aiohttp
 
 from verl.interactions.base import BaseInteraction
 
+# Try to import Ray for worker ID detection
+try:
+    import ray
+    RAY_AVAILABLE = True
+except ImportError:
+    RAY_AVAILABLE = False
+
 logger = logging.getLogger(__name__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
+
+# Module-level cache for worker_id and bound_endpoint (persists across all instances in the same process)
+# Key: (env_shards, base_port) tuple, Value: (worker_id, bound_endpoint) tuple
+_worker_endpoint_cache: dict[tuple[int, int], tuple[int, str]] = {}
+_cache_lock = threading.Lock()
 
 
 class GymEnvironmentInteraction(BaseInteraction):
@@ -47,6 +62,11 @@ class GymEnvironmentInteraction(BaseInteraction):
     Configuration options:
         - env_endpoint: HTTP endpoint for remote environment API
         - env_shards: Number of shards (servers on consecutive ports)
+        - bind_worker_to_endpoint: If True, each worker is bound to a specific endpoint
+          (1-to-1 worker <-> endpoint). Requires worker count == env_shards. Worker ID is
+          detected from Ray actor name (e.g., "agent_loop_worker_0" -> worker_id=0).
+          Worker ID and endpoint are cached at module level, persisting across all
+          instances in the same process.
         - env_factory: Callable that creates a local environment instance
         - max_steps: Maximum number of steps per episode
         - observation_template: Template for formatting observations as messages
@@ -63,7 +83,7 @@ class GymEnvironmentInteraction(BaseInteraction):
             env_shards: 8  # Will use ports 8091..8098
             max_steps: 100
     """
-
+    
     def __init__(self, config: dict):
         super().__init__(config)
         self.env_endpoint: Optional[str] = config.get("env_endpoint")
@@ -75,6 +95,13 @@ class GymEnvironmentInteraction(BaseInteraction):
         )
         # Job ID for statistics isolation when using shared game servers
         self.job_id: str = config.get("job_id", "default")
+
+        # When True: bind this worker to a specific endpoint (1-to-1 worker <-> endpoint)
+        self.bind_worker_to_endpoint: bool = bool(config.get("bind_worker_to_endpoint", False))
+        
+        # Worker-bound endpoint (set if bind_worker_to_endpoint is True)
+        self._bound_endpoint: Optional[str] = None
+        self._worker_id: Optional[int] = None
 
         # Generate sharded endpoints if env_shards > 1
         self.env_endpoints: Optional[list[str]] = None
@@ -90,15 +117,96 @@ class GymEnvironmentInteraction(BaseInteraction):
                     f"[GymEnvironmentInteraction] Sharded mode: {self.env_shards} shards "
                     f"on ports {base_port}..{base_port + self.env_shards - 1}"
                 )
+        
+        # Bind worker to endpoint if requested
+        if self.bind_worker_to_endpoint:
+            if not self.env_endpoints:
+                raise ValueError(
+                    "[GymEnvironmentInteraction] bind_worker_to_endpoint=True requires env_shards > 1"
+                )
+            # Use module-level cache keyed by (env_shards, base_port) to persist across all instances
+            parsed = urlparse(self.env_endpoint)
+            base_port = parsed.port if parsed.port else 0
+            cache_key = (self.env_shards, base_port)
+            
+            with _cache_lock:
+                if cache_key not in _worker_endpoint_cache:
+                    # First time: detect worker_id and compute bound_endpoint
+                    detected_id = self._detect_worker_id()
+                    
+                    if detected_id is None:
+                        raise RuntimeError(
+                            "[GymEnvironmentInteraction] bind_worker_to_endpoint=True but could not detect worker_id. "
+                            "Make sure this is running in a Ray actor with name like 'agent_loop_worker_0', "
+                            "or set RAY_WORKER_ID environment variable."
+                        )
+                    if detected_id < 0 or detected_id >= len(self.env_endpoints):
+                        raise ValueError(
+                            f"[GymEnvironmentInteraction] worker_id={detected_id} is out of range "
+                            f"for {len(self.env_endpoints)} endpoints. Ensure agent_num_workers == env_shards."
+                        )
+                    bound_endpoint = self.env_endpoints[detected_id]
+                    _worker_endpoint_cache[cache_key] = (detected_id, bound_endpoint)
+                    logger.info(
+                        f"[GymEnvironmentInteraction] Detected worker_id={detected_id} "
+                        f"bound to endpoint={bound_endpoint} "
+                        f"(module-level cache, persists across all instances in this process)"
+                    )
+                # Use cached values for this instance
+                self._worker_id, self._bound_endpoint = _worker_endpoint_cache[cache_key]
 
         # Session storage: maps instance_id to environment state
         self._instance_dict: dict[str, dict[str, Any]] = {}
 
         # For local environments, we can store the env objects
         self._local_envs: dict[str, Any] = {}
+    
+    def _detect_worker_id(self) -> Optional[int]:
+        """Detect worker ID from Ray actor name using get_actor_name() method.
+        
+        This uses the correct Ray API: runtime_context.get_actor_name()
+        
+        Returns:
+            Worker ID (0-based) if detected, None otherwise.
+        """
+        if not RAY_AVAILABLE:
+            return None
+        
+        try:
+            runtime_context = ray.get_runtime_context()
+            
+            # Use get_actor_name() method - this is the correct Ray API
+            actor_name = runtime_context.get_actor_name()
+            if actor_name:
+                match = re.search(r"agent_loop_worker_(\d+)", str(actor_name))
+                if match:
+                    worker_id = int(match.group(1))
+                    logger.info(f"[GymEnvironmentInteraction] Detected worker_id={worker_id} from actor_name={actor_name}")
+                    return worker_id
+            
+            # Fallback: Try environment variable
+            worker_id_env = os.environ.get("RAY_WORKER_ID")
+            if worker_id_env:
+                try:
+                    worker_id = int(worker_id_env)
+                    logger.info(f"[GymEnvironmentInteraction] Using worker_id={worker_id} from RAY_WORKER_ID env var")
+                    return worker_id
+                except ValueError:
+                    logger.warning(f"[GymEnvironmentInteraction] Invalid RAY_WORKER_ID value: {worker_id_env}")
+            
+        except Exception as e:
+            logger.debug(f"[GymEnvironmentInteraction] Failed to detect worker_id: {e}")
+        
+        return None
 
     def _get_endpoint(self, instance_id: str) -> str:
-        """Get the endpoint for this instance_id (supports sharding)."""
+        """Get the endpoint for this instance_id (supports sharding).
+
+        If bind_worker_to_endpoint is True: return the bound endpoint for this worker.
+        Otherwise: hash instance_id to pick shard (may collide).
+        """
+        if self.bind_worker_to_endpoint and self._bound_endpoint:
+            return self._bound_endpoint
         if self.env_endpoints:
             # Sharded mode: hash instance_id to pick shard
             idx = zlib.crc32(instance_id.encode("utf-8")) % len(self.env_endpoints)

@@ -41,7 +41,8 @@ Text Related Operations
 - When typing into a text field, sometimes an auto-complete dropdown list will appear. This usually indicating this is a enum field and you should try to select the best match by clicking the corresponding one in the list.
 """
 
-ACTION_SELECTION_PROMPT_TEMPLATE = (
+# Full template for initial prompt (used in raw_prompt)
+INITIAL_ACTION_SELECTION_PROMPT_TEMPLATE = (
     PROMPT_PREFIX
     + "\nThe current user goal/request is: {goal}"
     + "\n\nHere is a history of what you have done so far:\n{history}"
@@ -51,4 +52,10 @@ ACTION_SELECTION_PROMPT_TEMPLATE = (
     + "\n\nNow output an action from the above list in the correct JSON format, following the reason why you do that. Your answer should look like:\n"
     "Reason: ...\nAction: {{'action_type':...}}\n\n"
     "Your Answer:\n"
+)
+
+# Simplified template for subsequent turns in multi-turn conversation
+ACTION_SELECTION_PROMPT_TEMPLATE = (
+    "\nThe current user goal/request is: {goal}"
+    + "\n\nHere is a list of descriptions for some UI elements on the current screen:\n{ui_elements_description}\n"
 )

@@ -938,10 +938,51 @@ class PPOTrainingServerBackend:
                     repeat_times=self.config.actor_rollout_ref.rollout.n,
                     interleave=True,
                 )
+
+            # Per-turn training expansion: when agent loops expand multi-turn
+            # episodes into individual per-turn training samples, the gen_batch_output
+            # batch size is larger than the original batch. We need to expand the
+            # original batch to match using the expansion index.
+            expansion_index = gen_batch_output.meta_info.pop('per_turn_expansion_index', None)
+            if expansion_index is not None:
+                logger.info(
+                    f"[Per-turn training] Expanding original batch from {len(batch)} to "
+                    f"{len(gen_batch_output)} to match per-turn expanded rollout output"
+                )
+                expansion_index = np.array(expansion_index)
+                # Expand tensor batch
+                if batch.batch is not None and len(batch.batch.keys()) > 0:
+                    batch.batch = batch.batch[expansion_index]
+                elif batch.batch is not None:
+                    # Empty TensorDict (all keys were popped) — create new one with expanded size
+                    from tensordict import TensorDict
+                    batch.batch = TensorDict({}, batch_size=[len(expansion_index)])
+                # Expand non-tensor batch
+                expanded_non_tensor = {}
+                for k, v in batch.non_tensor_batch.items():
+                    expanded_non_tensor[k] = v[expansion_index]
+                batch.non_tensor_batch = expanded_non_tensor
+
             batch = batch.union(gen_batch_output)
             logger.info(
                 f"DEBUG: batch keys after gen union: {list(batch.batch.keys())}"
             )
+
+            # 3.1 Per-turn expansion may produce a batch size not divisible by world_size.
+            #     Trim excess samples so downstream partitioning works.
+            world_size = (
+                self.actor_rollout_wg.world_size
+                if not self.async_rollout_mode
+                else self.config.actor_rollout_ref.rollout.agent.num_workers
+            )
+            remainder = len(batch) % world_size
+            if remainder != 0:
+                trim_to = len(batch) - remainder
+                logger.info(
+                    f"[Per-turn training] Trimming batch from {len(batch)} to {trim_to} "
+                    f"(divisible by world_size={world_size})"
+                )
+                batch = batch[:trim_to]
 
             # 4. Compute response mask if not present
             if "response_mask" not in batch.batch.keys():
@@ -1493,6 +1534,24 @@ class PPOTrainingServerBackend:
             )
 
             # 6. Merge original batch and generated output
+            # Per-turn training expansion: expand batch if gen output is larger
+            expansion_index = gen_batch_output.meta_info.pop('per_turn_expansion_index', None)
+            if expansion_index is not None:
+                logger.info(
+                    f"[Per-turn training] Validation: Expanding original batch from {len(batch)} to "
+                    f"{len(gen_batch_output)} to match per-turn expanded rollout output"
+                )
+                expansion_index = np.array(expansion_index)
+                if batch.batch is not None and len(batch.batch.keys()) > 0:
+                    batch.batch = batch.batch[expansion_index]
+                elif batch.batch is not None:
+                    # Empty TensorDict (all keys were popped) — create new one with expanded size
+                    from tensordict import TensorDict
+                    batch.batch = TensorDict({}, batch_size=[len(expansion_index)])
+                expanded_non_tensor = {}
+                for k, v in batch.non_tensor_batch.items():
+                    expanded_non_tensor[k] = v[expansion_index]
+                batch.non_tensor_batch = expanded_non_tensor
             batch = batch.union(gen_batch_output)
 
             # 7. Compute reward using validation reward function

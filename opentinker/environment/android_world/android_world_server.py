@@ -48,6 +48,22 @@ def main():
         default=-1,
         help="Number of games to load",
     )
+    # Multi-emulator support: each shard connects to a different emulator
+    parser.add_argument(
+        "--emulator_base_console_port",
+        type=int,
+        default=5556,
+        help="Base console port for emulators. Shard i uses port base+i*2 (e.g., 5556, 5558, 5560, 5562)",
+    )
+    parser.add_argument(
+        "--emulator_base_grpc_port",
+        type=int,
+        default=8554,
+        help="Base gRPC port for emulators. Shard i uses port base+i (e.g., 8554, 8555, 8556, 8557)",
+    )
+    # Per-shard emulator ports (set automatically when launching shards)
+    parser.add_argument("--emulator_console_port", type=int, default=None, help="(Internal) Console port for this shard")
+    parser.add_argument("--emulator_grpc_port", type=int, default=None, help="(Internal) gRPC port for this shard")
     args = parser.parse_args()
 
     # Import here to avoid issues with multiprocessing
@@ -59,16 +75,25 @@ def main():
     print(f"  Num games: {args.num_games if args.num_games > 0 else 'all'}")
     print(f"  Shards: {args.shards}")
     print(f"  Config: {args.config_path or 'default'}")
+    if args.shards > 1:
+        print(f"  Emulator base ports: console={args.emulator_base_console_port}, grpc={args.emulator_base_grpc_port}")
 
     if args.shards and args.shards > 1:
         print(
             f"\nStarting sharded mode: {args.shards} shards on ports {args.port}..{args.port + args.shards - 1}"
         )
+        print("Each shard connects to a different emulator:")
+        for i in range(args.shards):
+            console_port = args.emulator_base_console_port + i * 2  # 5556, 5558, 5560, 5562
+            grpc_port = args.emulator_base_grpc_port + i  # 8554, 8555, 8556, 8557
+            print(f"  Shard {i}: server port {args.port + i}, emulator console={console_port}, grpc={grpc_port}")
 
         children: list[subprocess.Popen] = []
         try:
             for i in range(args.shards):
                 port_i = args.port + i
+                console_port_i = args.emulator_base_console_port + i * 2
+                grpc_port_i = args.emulator_base_grpc_port + i
                 cmd = [
                     sys.executable,
                     os.path.abspath(__file__),
@@ -84,6 +109,10 @@ def main():
                     args.split,
                     "--num_games",
                     str(args.num_games),
+                    "--emulator_console_port",
+                    str(console_port_i),
+                    "--emulator_grpc_port",
+                    str(grpc_port_i),
                 ]
                 if args.config_path is not None:
                     cmd.extend(["--config_path", args.config_path])
@@ -120,6 +149,11 @@ def main():
 
     from opentinker.environment.base_game_server import run_game_server
 
+    # For single shard mode, use explicit ports if provided, else fall back to base ports
+    console_port = args.emulator_console_port or args.emulator_base_console_port
+    grpc_port = args.emulator_grpc_port or args.emulator_base_grpc_port
+    print(f"  Emulator: console={console_port}, grpc={grpc_port}")
+
     run_game_server(
         game_class=AndroidWorldGame,
         host=args.host,
@@ -129,6 +163,8 @@ def main():
         max_steps=args.max_steps,
         split=args.split,
         num_games=args.num_games,
+        emulator_console_port=console_port,
+        emulator_grpc_port=grpc_port,
     )
 
 
