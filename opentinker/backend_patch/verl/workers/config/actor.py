@@ -262,6 +262,10 @@ class FSDPActorConfig(ActorConfig):
     self_distillation_beta: float = 0.5       # JSD interpolation parameter
     self_distillation_clip_advantage: float = 0.0  # Clip advantage for sampled_token loss
     self_distillation_solution_template: str = "\n\nReference solution: {solution}\n\n After understanding the reference solution, please try to solve this problem using your own approach below:"
+    # Teacher quality filtering
+    sd_positive_advantage_only: bool = False
+    sd_teacher_min_log_prob: Optional[float] = None
+    sd_sequence_ppl_max: Optional[float] = None
 
     def __post_init__(self):
         """Validate FSDP actor configuration parameters."""

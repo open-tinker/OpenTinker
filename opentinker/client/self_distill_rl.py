@@ -155,6 +155,10 @@ def _set_self_distillation_config(client, args, env):
                     "self_distillation_beta": sd_cfg.get("beta", 0.5),
                     "self_distillation_clip_advantage": sd_cfg.get("clip_advantage", 0.0),
                     "self_distillation_solution_template": solution_template,
+                    # Teacher quality filtering
+                    "sd_positive_advantage_only": sd_cfg.get("positive_advantage_only", False),
+                    "sd_teacher_min_log_prob": sd_cfg.get("teacher_min_log_prob", None),
+                    "sd_sequence_ppl_max": sd_cfg.get("sequence_ppl_max", None),
                     # No standard distillation
                     "use_distillation": False,
                 },
@@ -199,6 +203,18 @@ def _set_self_distillation_config(client, args, env):
     print(f"  - beta: {sd_cfg.get('beta', 0.5)}")
     print(f"  - solution_template: {solution_template}")
     print(f"  - No separate teacher model (uses actor as teacher)")
+    # Teacher quality filters
+    filters = []
+    if sd_cfg.get("positive_advantage_only", False):
+        filters.append("positive_advantage_only")
+    if sd_cfg.get("teacher_min_log_prob") is not None:
+        filters.append(f"teacher_min_log_prob={sd_cfg['teacher_min_log_prob']}")
+    if sd_cfg.get("sequence_ppl_max") is not None:
+        filters.append(f"sequence_ppl_max={sd_cfg['sequence_ppl_max']}")
+    if filters:
+        print(f"  - Teacher quality filters: {', '.join(filters)}")
+    else:
+        print(f"  - Teacher quality filters: none")
 
 
 if __name__ == "__main__":

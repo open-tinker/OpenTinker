@@ -13,11 +13,87 @@ Implements the loss functions from Self-Distilled Reasoner (arXiv:2601.18734):
 Both losses:
 - Use the SAME model with different conditioning (student vs teacher)
 - Gradient flows only through the student (teacher is detached)
+
+Teacher quality filtering:
+- positive_advantage_only: Only distill from tokens where teacher > student
+- teacher_min_prob: Skip tokens where teacher probability is too low
+- sequence_ppl_threshold: Skip entire sequences where teacher perplexity is too high
 """
+
+from typing import Optional
 
 import torch
 
 from verl.trainer.ppo.core_algos import agg_loss
+
+
+def compute_teacher_quality_mask(
+    student_log_probs: torch.Tensor,
+    teacher_log_probs: torch.Tensor,
+    response_mask: torch.Tensor,
+    positive_advantage_only: bool = False,
+    teacher_min_log_prob: Optional[float] = None,
+    sequence_ppl_max: Optional[float] = None,
+) -> tuple[torch.Tensor, dict]:
+    """Compute a quality mask that filters teacher signals by reliability.
+
+    Combines multiple filtering strategies to produce a refined mask. All
+    filters are applied on top of the original response_mask so padding
+    tokens remain masked.
+
+    Args:
+        student_log_probs: (batch, response_len) student log p(token)
+        teacher_log_probs: (batch, response_len) teacher log p(token)
+        response_mask: (batch, response_len) original valid-token mask
+        positive_advantage_only: If True, only keep tokens where
+            log p_T > log p_S (teacher is more confident).
+        teacher_min_log_prob: If set, mask out tokens where teacher
+            log prob < this threshold (teacher is too uncertain).
+        sequence_ppl_max: If set, mask out entire sequences where the
+            teacher's perplexity exceeds this value.
+
+    Returns:
+        (filtered_mask, filter_metrics) where filtered_mask has the same
+        shape as response_mask and filter_metrics contains diagnostics.
+    """
+    filtered_mask = response_mask.clone()
+    metrics = {}
+    valid_tokens_before = response_mask.sum().clamp(min=1)
+
+    # --- 1. Positive-advantage filter (token-level) ---
+    if positive_advantage_only:
+        advantage = teacher_log_probs.detach() - student_log_probs.detach()
+        pos_mask = (advantage > 0).float()
+        filtered_mask = filtered_mask * pos_mask
+        metrics["filter/positive_adv_ratio"] = (
+            (pos_mask * response_mask).sum() / valid_tokens_before
+        )
+
+    # --- 2. Teacher minimum probability filter (token-level) ---
+    if teacher_min_log_prob is not None:
+        conf_mask = (teacher_log_probs.detach() >= teacher_min_log_prob).float()
+        filtered_mask = filtered_mask * conf_mask
+        metrics["filter/teacher_conf_ratio"] = (
+            (conf_mask * response_mask).sum() / valid_tokens_before
+        )
+
+    # --- 3. Sequence-level teacher perplexity filter ---
+    if sequence_ppl_max is not None:
+        # Per-sequence perplexity: exp( -1/N * sum log p_T )
+        seq_lengths = response_mask.sum(dim=-1).clamp(min=1)  # (batch,)
+        neg_mean_log_prob = -(teacher_log_probs.detach() * response_mask).sum(dim=-1) / seq_lengths
+        seq_ppl = neg_mean_log_prob.exp()  # (batch,)
+        seq_keep = (seq_ppl <= sequence_ppl_max).float()  # (batch,)
+        filtered_mask = filtered_mask * seq_keep.unsqueeze(-1)
+        metrics["filter/seq_ppl_mean"] = seq_ppl.mean()
+        metrics["filter/seq_ppl_max"] = seq_ppl.max()
+        metrics["filter/seq_keep_ratio"] = seq_keep.mean()
+
+    # --- Overall filter stats ---
+    valid_tokens_after = filtered_mask.sum().clamp(min=1)
+    metrics["filter/token_keep_ratio"] = valid_tokens_after / valid_tokens_before
+
+    return filtered_mask, metrics
 
 
 def compute_jsd_loss(
@@ -27,6 +103,9 @@ def compute_jsd_loss(
     loss_agg_mode: str,
     beta: float = 0.5,
     return_metrics: bool = False,
+    positive_advantage_only: bool = False,
+    teacher_min_log_prob: Optional[float] = None,
+    sequence_ppl_max: Optional[float] = None,
 ) -> torch.Tensor | tuple[torch.Tensor, dict]:
     """Compute Generalized Jensen-Shannon Divergence loss.
 
@@ -43,12 +122,27 @@ def compute_jsd_loss(
         loss_agg_mode: aggregation mode, e.g. "token-mean"
         beta: interpolation parameter (0.5 = symmetric JSD)
         return_metrics: if True, return additional metrics dict
+        positive_advantage_only: only distill tokens where teacher > student
+        teacher_min_log_prob: skip tokens where teacher log prob < threshold
+        sequence_ppl_max: skip sequences where teacher perplexity > threshold
 
     Returns:
         loss tensor, optionally (loss, metrics_dict) tuple
     """
     # Detach teacher: gradient flows only through student
     teacher_log_probs = teacher_log_probs.detach()
+
+    # Apply teacher quality filtering
+    filter_metrics = {}
+    if positive_advantage_only or teacher_min_log_prob is not None or sequence_ppl_max is not None:
+        response_mask, filter_metrics = compute_teacher_quality_mask(
+            student_log_probs=student_log_probs,
+            teacher_log_probs=teacher_log_probs,
+            response_mask=response_mask,
+            positive_advantage_only=positive_advantage_only,
+            teacher_min_log_prob=teacher_min_log_prob,
+            sequence_ppl_max=sequence_ppl_max,
+        )
 
     # Convert to probabilities
     p_teacher = teacher_log_probs.exp()
@@ -82,6 +176,7 @@ def compute_jsd_loss(
             "student_entropy": -(student_log_probs * response_mask).sum() / valid_tokens,
             "teacher_entropy": -(teacher_log_probs * response_mask).sum() / valid_tokens,
             "advantage_mean": ((teacher_log_probs - student_log_probs) * response_mask).sum() / valid_tokens,
+            **filter_metrics,
         }
         return loss, metrics
 
@@ -95,6 +190,9 @@ def compute_sampled_token_loss(
     loss_agg_mode: str,
     clip_advantage: float = 0.0,
     return_metrics: bool = False,
+    positive_advantage_only: bool = False,
+    teacher_min_log_prob: Optional[float] = None,
+    sequence_ppl_max: Optional[float] = None,
 ) -> torch.Tensor | tuple[torch.Tensor, dict]:
     """Compute sampled-token advantage-weighted policy gradient loss.
 
@@ -113,12 +211,27 @@ def compute_sampled_token_loss(
         loss_agg_mode: aggregation mode
         clip_advantage: if > 0, clip advantages to [-clip, clip] for stability
         return_metrics: if True, return metrics dict
+        positive_advantage_only: only distill tokens where teacher > student
+        teacher_min_log_prob: skip tokens where teacher log prob < threshold
+        sequence_ppl_max: skip sequences where teacher perplexity > threshold
 
     Returns:
         loss tensor, optionally (loss, metrics_dict) tuple
     """
     # Detach teacher
     teacher_log_probs = teacher_log_probs.detach()
+
+    # Apply teacher quality filtering
+    filter_metrics = {}
+    if positive_advantage_only or teacher_min_log_prob is not None or sequence_ppl_max is not None:
+        response_mask, filter_metrics = compute_teacher_quality_mask(
+            student_log_probs=student_log_probs,
+            teacher_log_probs=teacher_log_probs,
+            response_mask=response_mask,
+            positive_advantage_only=positive_advantage_only,
+            teacher_min_log_prob=teacher_min_log_prob,
+            sequence_ppl_max=sequence_ppl_max,
+        )
 
     # Compute per-token advantage: A_n = log p_T - log p_S
     # Detach both for advantage computation (advantage is a fixed signal)
@@ -143,6 +256,7 @@ def compute_sampled_token_loss(
             "teacher_log_prob_mean": (teacher_log_probs * response_mask).sum() / valid_tokens,
             "student_entropy": -(student_log_probs * response_mask).sum() / valid_tokens,
             "teacher_entropy": -(teacher_log_probs * response_mask).sum() / valid_tokens,
+            **filter_metrics,
         }
         return loss, metrics
 

@@ -105,11 +105,23 @@ class DataParallelPPOActor(BasePPOActor):
         self.self_distillation_loss_type = self.config.get("self_distillation_loss_type", "jsd")
         self.self_distillation_beta = self.config.get("self_distillation_beta", 0.5)
         self.self_distillation_clip_advantage = self.config.get("self_distillation_clip_advantage", 0.0)
+        # Teacher quality filtering
+        self.sd_positive_advantage_only = self.config.get("sd_positive_advantage_only", False)
+        self.sd_teacher_min_log_prob = self.config.get("sd_teacher_min_log_prob", None)
+        self.sd_sequence_ppl_max = self.config.get("sd_sequence_ppl_max", None)
 
         if torch.distributed.get_rank() == 0 and self.use_self_distillation:
+            filter_info = []
+            if self.sd_positive_advantage_only:
+                filter_info.append("positive_advantage_only")
+            if self.sd_teacher_min_log_prob is not None:
+                filter_info.append(f"teacher_min_log_prob={self.sd_teacher_min_log_prob}")
+            if self.sd_sequence_ppl_max is not None:
+                filter_info.append(f"sequence_ppl_max={self.sd_sequence_ppl_max}")
             print(
                 f"[SelfDistillation] Enabled: loss_type={self.self_distillation_loss_type}, "
                 f"beta={self.self_distillation_beta}"
+                + (f", filters=[{', '.join(filter_info)}]" if filter_info else "")
             )
 
     def _forward_micro_batch(
@@ -518,6 +530,13 @@ class DataParallelPPOActor(BasePPOActor):
                         # Same model as teacher+student, teacher conditioned on (x, y*)
                         teacher_log_probs = model_inputs["self_distill_teacher_log_probs"]
 
+                        # Common filter kwargs for teacher quality filtering
+                        _filter_kwargs = dict(
+                            positive_advantage_only=self.sd_positive_advantage_only,
+                            teacher_min_log_prob=self.sd_teacher_min_log_prob,
+                            sequence_ppl_max=self.sd_sequence_ppl_max,
+                        )
+
                         if self.self_distillation_loss_type == "jsd":
                             from opentinker.self_distillation.loss import compute_jsd_loss
                             sd_loss, sd_metrics = compute_jsd_loss(
@@ -527,6 +546,7 @@ class DataParallelPPOActor(BasePPOActor):
                                 loss_agg_mode=loss_agg_mode,
                                 beta=self.self_distillation_beta,
                                 return_metrics=True,
+                                **_filter_kwargs,
                             )
                         elif self.self_distillation_loss_type == "sampled_token":
                             from opentinker.self_distillation.loss import compute_sampled_token_loss
@@ -537,6 +557,7 @@ class DataParallelPPOActor(BasePPOActor):
                                 loss_agg_mode=loss_agg_mode,
                                 clip_advantage=self.self_distillation_clip_advantage,
                                 return_metrics=True,
+                                **_filter_kwargs,
                             )
                         else:
                             raise ValueError(

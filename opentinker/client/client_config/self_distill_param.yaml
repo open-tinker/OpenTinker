@@ -58,7 +58,12 @@ self_distillation:
   clip_advantage: 0.0             # Clip advantages for sampled_token loss (0 = no clipping)
   solution_key: "answer"      # Field inside extra_info containing step-by-step solution
   solution_template: "\n\nReference solution: {solution}\n\n After understanding the reference solution, please try to solve this problem using your own approach below:"
-  max_solution_length: 512        # Max tokens for solution text
+  max_solution_length: 1024        # Max tokens for solution text
+  # Teacher quality filtering — only learn from reliable teacher signals
+  positive_advantage_only: true  # Only distill tokens where teacher > student (log p_T > log p_S)
+  teacher_min_log_prob: -5.0      # Skip tokens where teacher log prob < threshold (e.g. -5.0)
+  sequence_ppl_max: 50.0          # Skip entire sequences where teacher perplexity > threshold (e.g. 50.0)
+
 
 # LoRA configuration (paper uses LoRA rank 64)
 lora:

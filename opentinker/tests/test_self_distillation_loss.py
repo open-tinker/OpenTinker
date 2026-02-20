@@ -284,6 +284,154 @@ def test_sampled_token_returns_metrics():
     assert set(metrics.keys()) == expected_keys, f"Missing keys: {expected_keys - set(metrics.keys())}"
 
 
+# ===== Teacher Quality Filtering Tests =====
+
+
+def test_quality_mask_positive_advantage_only():
+    """positive_advantage_only should mask tokens where student > teacher."""
+    from opentinker.self_distillation.loss import compute_teacher_quality_mask
+
+    # Token 0: teacher > student (keep), Token 1: student > teacher (filter)
+    student = torch.tensor([[-2.0, -0.5, -1.0]])
+    teacher = torch.tensor([[-0.5, -2.0, -1.0]])
+    mask = torch.ones(1, 3)
+
+    filtered, metrics = compute_teacher_quality_mask(
+        student, teacher, mask, positive_advantage_only=True,
+    )
+    # Token 0: adv = -0.5 - (-2.0) = 1.5 > 0 → keep
+    # Token 1: adv = -2.0 - (-0.5) = -1.5 < 0 → filter
+    # Token 2: adv = 0 → filter (not strictly > 0)
+    assert filtered[0, 0].item() == 1.0
+    assert filtered[0, 1].item() == 0.0
+    assert filtered[0, 2].item() == 0.0
+    assert "filter/positive_adv_ratio" in metrics
+
+
+def test_quality_mask_teacher_min_log_prob():
+    """teacher_min_log_prob should mask tokens where teacher is too uncertain."""
+    from opentinker.self_distillation.loss import compute_teacher_quality_mask
+
+    student = torch.tensor([[-1.0, -1.0, -1.0]])
+    teacher = torch.tensor([[-0.5, -3.0, -6.0]])
+    mask = torch.ones(1, 3)
+
+    filtered, metrics = compute_teacher_quality_mask(
+        student, teacher, mask, teacher_min_log_prob=-2.0,
+    )
+    # Token 0: -0.5 >= -2.0 → keep
+    # Token 1: -3.0 < -2.0 → filter
+    # Token 2: -6.0 < -2.0 → filter
+    assert filtered[0, 0].item() == 1.0
+    assert filtered[0, 1].item() == 0.0
+    assert filtered[0, 2].item() == 0.0
+    assert "filter/teacher_conf_ratio" in metrics
+
+
+def test_quality_mask_sequence_ppl():
+    """sequence_ppl_max should mask entire sequences with high teacher perplexity."""
+    from opentinker.self_distillation.loss import compute_teacher_quality_mask
+
+    # Batch of 2 sequences
+    # Seq 0: teacher log probs ~ -1.0 → ppl ~ e^1 ≈ 2.7
+    # Seq 1: teacher log probs ~ -5.0 → ppl ~ e^5 ≈ 148.4
+    student = torch.tensor([[-1.0, -1.0], [-1.0, -1.0]])
+    teacher = torch.tensor([[-1.0, -1.0], [-5.0, -5.0]])
+    mask = torch.ones(2, 2)
+
+    filtered, metrics = compute_teacher_quality_mask(
+        student, teacher, mask, sequence_ppl_max=10.0,
+    )
+    # Seq 0: ppl ≈ 2.7 <= 10.0 → keep
+    assert filtered[0, 0].item() == 1.0
+    assert filtered[0, 1].item() == 1.0
+    # Seq 1: ppl ≈ 148.4 > 10.0 → filter entire sequence
+    assert filtered[1, 0].item() == 0.0
+    assert filtered[1, 1].item() == 0.0
+    assert "filter/seq_keep_ratio" in metrics
+    assert metrics["filter/seq_keep_ratio"].item() == 0.5
+
+
+def test_quality_mask_combined_filters():
+    """Multiple filters should compose (intersection)."""
+    from opentinker.self_distillation.loss import compute_teacher_quality_mask
+
+    student = torch.tensor([[-2.0, -0.5]])
+    teacher = torch.tensor([[-0.5, -2.0]])
+    mask = torch.ones(1, 2)
+
+    filtered, metrics = compute_teacher_quality_mask(
+        student, teacher, mask,
+        positive_advantage_only=True,
+        teacher_min_log_prob=-1.0,
+    )
+    # Token 0: adv > 0 (keep) AND teacher=-0.5 >= -1.0 (keep) → keep
+    # Token 1: adv < 0 (filter) → filter regardless of confidence
+    assert filtered[0, 0].item() == 1.0
+    assert filtered[0, 1].item() == 0.0
+
+
+def test_quality_mask_no_filters():
+    """No filters should return original mask unchanged."""
+    from opentinker.self_distillation.loss import compute_teacher_quality_mask
+
+    student = torch.tensor([[-1.0, -2.0]])
+    teacher = torch.tensor([[-2.0, -1.0]])
+    mask = torch.tensor([[1.0, 0.0]])
+
+    filtered, metrics = compute_teacher_quality_mask(student, teacher, mask)
+    assert torch.equal(filtered, mask)
+    assert metrics["filter/token_keep_ratio"].item() == 1.0
+
+
+def test_sampled_token_with_positive_advantage_filter():
+    """Sampled token loss with positive_advantage_only should only use positive-advantage tokens."""
+    from opentinker.self_distillation.loss import compute_sampled_token_loss
+
+    student = torch.tensor([[-2.0, -0.5]]).requires_grad_(True)
+    teacher = torch.tensor([[-0.5, -2.0]])  # token 0: adv>0, token 1: adv<0
+    mask = torch.ones(1, 2)
+
+    loss, metrics = compute_sampled_token_loss(
+        student_log_probs=student, teacher_log_probs=teacher,
+        response_mask=mask, loss_agg_mode="token-mean",
+        return_metrics=True, positive_advantage_only=True,
+    )
+
+    assert "filter/positive_adv_ratio" in metrics
+    assert "filter/token_keep_ratio" in metrics
+    # Loss should be positive since only positive-advantage tokens are used
+    # A_n > 0, log p_S < 0, so -A_n * log p_S > 0
+    assert loss.item() > 0, f"Loss with positive-advantage filter should be > 0, got {loss.item()}"
+
+
+def test_jsd_with_sequence_ppl_filter():
+    """JSD loss with sequence_ppl_max should skip high-perplexity sequences."""
+    from opentinker.self_distillation.loss import compute_jsd_loss
+
+    # 2 sequences: one low ppl, one high ppl
+    student = torch.tensor([[-1.0, -1.0], [-1.0, -1.0]])
+    teacher = torch.tensor([[-1.0, -1.0], [-8.0, -8.0]])
+    mask = torch.ones(2, 2)
+
+    loss_filtered, metrics = compute_jsd_loss(
+        student_log_probs=student, teacher_log_probs=teacher,
+        response_mask=mask, loss_agg_mode="token-mean",
+        return_metrics=True, sequence_ppl_max=10.0,
+    )
+
+    loss_unfiltered = compute_jsd_loss(
+        student_log_probs=student, teacher_log_probs=teacher,
+        response_mask=mask, loss_agg_mode="token-mean",
+    )
+
+    # They should differ since seq 1 is filtered
+    assert not torch.isclose(loss_filtered, loss_unfiltered, atol=1e-6), (
+        f"Filtered={loss_filtered.item()} should differ from unfiltered={loss_unfiltered.item()}"
+    )
+    assert "filter/seq_keep_ratio" in metrics
+
+
 # ===== Teacher Utils Tests =====
 
 
