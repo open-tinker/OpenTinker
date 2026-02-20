@@ -298,3 +298,41 @@ def _fallback_to_standard_grpo(
         advantages = scores.unsqueeze(-1) * response_mask
 
     return advantages, advantages
+
+
+def incorporate_kl_penalty_in_advantage(
+    data,
+    kl_penalty_coef: float,
+):
+    """Add per-token KL penalty to advantages for on-policy distillation.
+
+    Can be applied on top of any base advantage estimator (GRPO, GAE/PPO, etc.):
+        A_final_t = A_base_t - α * (log π_student(a_t) - log π_teacher(a_t))
+
+    Adding KL *after* advantage normalization keeps the task signal scale intact
+    while the KL term acts as an independent penalty for teacher divergence.
+
+    Args:
+        data: DataProto with keys:
+            - advantages: base advantages from any estimator (batch, response_len)
+            - old_log_probs: student log-probs at training time (batch, response_len)
+            - ref_log_prob: teacher/reference log-probs (batch, response_len)
+            - response_mask: 1 for LLM tokens, 0 for env/padding tokens
+        kl_penalty_coef: α — weight of KL penalty relative to task advantage
+
+    Returns:
+        data with batch["advantages"] and batch["returns"] updated in-place.
+    """
+    advantages = data.batch["advantages"]
+    old_log_probs = data.batch["old_log_probs"]   # log π_student
+    ref_log_probs = data.batch["ref_log_prob"]     # log π_teacher
+    response_mask = data.batch["response_mask"]
+
+    # Reverse KL per token: positive when student diverges from teacher
+    kl = (old_log_probs - ref_log_probs) * response_mask
+
+    # Subtract α * KL from advantages (divergence lowers advantage)
+    data.batch["advantages"] = advantages - kl_penalty_coef * kl
+    data.batch["returns"] = data.batch["advantages"]
+
+    return data

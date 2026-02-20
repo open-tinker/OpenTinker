@@ -6,11 +6,12 @@
 # export PATH=$CUDA_HOME/bin:$PATH
 # export LD_LIBRARY_PATH=$CUDA_HOME/lib64:$LD_LIBRARY_PATH
 
-export ROLLOUT_TRACE_DIR="${ROLLOUT_TRACE_DIR:-./traces}"
-mkdir -p "$ROLLOUT_TRACE_DIR"
-# export NVCC_EXECUTABLE=$CUDA_HOME/bin/nvcc
-export TORCH_CUDA_ARCH_LIST="9.0"
-export FLASHINFER_HOMOGENEOUS_MS=1
+# export ROLLOUT_TRACE_DIR="${ROLLOUT_TRACE_DIR:-./traces}"
+# mkdir -p "$ROLLOUT_TRACE_DIR"
+# export TORCH_CUDA_ARCH_LIST="9.0"
+# export FLASHINFER_HOMOGENEOUS_MS=1
+
+export ROLLOUT_TRACE_DIR="/workspace/logs"
 
 # Default configuration
 AVAILABLE_GPUS="[0,1,2,3]"

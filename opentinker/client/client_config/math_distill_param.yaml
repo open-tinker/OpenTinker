@@ -1,0 +1,93 @@
+# On-Policy Distillation Configuration (Math task)
+# Combines any RL advantage estimator with a per-token KL penalty toward a teacher model.
+#
+# Algorithm:  A_final = A_base - kl_coef * (log π_student - log π_teacher)
+# Where A_base comes from adv_estimator (grpo / gae / grpo_per_step).
+
+# Project settings
+project_name: opentinker
+experiment_name: math_distill
+
+# Logging
+logger_backends: ["console", "wandb"]
+wandb_key: null
+
+# Model and tokenizer
+tokenizer_path: null
+
+# Teacher model (reference policy).
+# null → use the initial student checkpoint as teacher (same as standard RLVR).
+# Set to a path to distill from a stronger/larger model.
+teacher_model_path: null
+
+# Data paths
+data_path: null
+val_data_path: null
+
+# Training parameters
+batch_size: 64
+num_workers: 0
+num_epochs: 10
+num_steps: null
+save_freq: 100
+test_freq: 50
+
+# Validation parameters
+val_batch_size: 100
+
+# Generation parameters
+temperature: 0.7
+top_p: 1
+max_new_tokens: 4098
+max_prompt_tokens: 4096
+
+# Algorithm
+algorithm: "agent_loop"
+
+# RL advantage estimator — works with any of:
+#   "grpo"          : standard GRPO (outcome-level advantage)
+#   "grpo_per_step" : per-turn GRPO (multi-turn tasks)
+#   "gae"           : GAE / PPO (requires critic)
+adv_estimator: "grpo"
+rollout_n: 16
+
+# On-policy distillation switch.
+# When true, a per-token KL advantage is added on top of the RL advantage:
+#   A_final = A_base - kl_coef * KL(student || teacher)
+use_kl_in_advantage: true
+
+# KL penalty coefficient α.
+# Higher → stay closer to teacher; lower → optimize reward freely.
+kl_penalty_coef: 0.1
+
+# LoRA configuration
+lora:
+  lora_rank: 0
+  lora_alpha: 16
+  target_modules: "all-linear"
+  exclude_modules: null
+  lora_adapter_path: null
+
+# Interaction configuration
+interaction:
+  name: math
+  class_path: opentinker.environment.gym_environment_interaction.GymEnvironmentInteraction
+  config:
+    env_host: 0.0.0.0
+    env_port: 8088
+    env_endpoint: http://${interaction.config.env_host}:${interaction.config.env_port}
+    max_steps: 1
+
+multi_turn:
+  max_user_turns: 0
+  max_assistant_turns: 1
+  max_tokens_per_turn: 4096
+  weave_project: null
+  experiment_name: "math_distill_interaction"
+
+# Scheduler settings
+scheduler_url: "http://0.0.0.0:8780"
+scheduler_api_key: otk_98b8db24ccd64c92e1fdd9a232e209fa
+
+# GPU settings
+num_gpus: 4

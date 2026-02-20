@@ -76,6 +76,9 @@ from opentinker.backend_patch.verl.trainer.ppo.ray_trainer import (
     compute_advantage,
     compute_response_mask,
 )
+from opentinker.backend_patch.verl.trainer.ppo.per_step_core_algos import (
+    incorporate_kl_penalty_in_advantage,
+)
 
 from opentinker.backend_patch.verl.trainer.ppo.reward import (
     compute_reward,
@@ -480,9 +483,11 @@ def build_role_worker_mapping(config):
     else:
         print(f"✗ Critic not needed (adv_estimator={config.algorithm.adv_estimator})")
 
-    # Reference policy (if KL loss or KL reward is used)
+    # Reference policy (if KL loss, KL reward, or KL-in-advantage is used)
     if hasattr(config, "algorithm") and (
-        config.algorithm.use_kl_in_reward or config.actor_rollout_ref.actor.use_kl_loss
+        config.algorithm.use_kl_in_reward
+        or config.actor_rollout_ref.actor.use_kl_loss
+        or config.algorithm.get("use_kl_in_advantage", False)
     ):
         # Use the same actor rollout class for reference policy
         if config.actor_rollout_ref.actor.strategy in {"fsdp", "fsdp2"}:
@@ -1160,6 +1165,19 @@ class PPOTrainingServerBackend:
                     norm_adv_by_std_in_grpo=norm_adv_by_std_in_grpo,
                     config=self.config.algorithm,
                 )
+
+                # On-policy distillation: add per-token KL penalty to advantage.
+                # A_final = A_base - α * (log π_student - log π_teacher)
+                # Works with any adv_estimator (grpo, gae, grpo_per_step, …).
+                if self.config.algorithm.get("use_kl_in_advantage", False):
+                    kl_coef = self.config.algorithm.kl_ctrl.kl_coef
+                    batch = incorporate_kl_penalty_in_advantage(batch, kl_coef)
+                    kl = (
+                        (batch.batch["old_log_probs"] - batch.batch["ref_log_prob"])
+                        * batch.batch["response_mask"]
+                    )
+                    metrics["distill/kl_per_token"] = kl.mean().item()
+                    metrics["distill/kl_coef"] = kl_coef
 
             # 10. Update critic
             if self.use_critic:
