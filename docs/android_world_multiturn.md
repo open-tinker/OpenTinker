@@ -174,6 +174,56 @@ Start the emulator in a separate terminal or background process using the `sg` c
     emulator -avd AndroidWorldAvd -no-snapshot -grpc 8554 -no-window -no-audio -accel off
     ```
 
+## Quick Start with `run_android.sh`
+
+For multi-emulator parallel training, we provide an all-in-one launcher script [`opentinker/scripts/run_android.sh`](../opentinker/scripts/run_android.sh) that automates AVD creation, emulator startup, environment server, and training client.
+
+### Usage
+
+Run each step in a **separate terminal**:
+
+```bash
+# Step 0 (one-time): Create N AVDs for parallel training
+bash opentinker/scripts/run_android.sh setup-avds
+
+# Step 1: Start the scheduler
+bash opentinker/scripts/run_android.sh scheduler
+
+# Step 2: Start N Android emulators in parallel
+bash opentinker/scripts/run_android.sh simulator
+
+# Step 3: Start the sharded environment server (after emulators fully boot)
+bash opentinker/scripts/run_android.sh env
+
+# Step 4: Launch RL training
+bash opentinker/scripts/run_android.sh client
+```
+
+### Environment Variables
+
+All settings are configurable via environment variables:
+
+| Variable | Default | Description |
+| :------- | :------ | :---------- |
+| `NUM_EMULATORS` | `4` | Number of parallel emulators |
+| `NUM_GPUS` | `4` | Number of GPUs for model parallelism |
+| `GPUS` | `[0,1,2,3]` | GPU device list |
+| `MODEL_PATH` | `Qwen/Qwen2.5-3B-Instruct` | Model path or HuggingFace ID |
+| `AVD_NAME` | `AndroidWorldAvd` | AVD name prefix (creates `{AVD_NAME}_0`, `{AVD_NAME}_1`, ...) |
+| `EMULATOR_HEADLESS` | `1` | Set `0` to show emulator GUI |
+| `EMULATOR_NO_KVM` | `0` | Set `1` for software emulation (slow) |
+| `SCHEDULER_PORT` | `9780` | Scheduler listen port |
+| `ENV_PORT` | `9092` | Environment server base port |
+
+**Example** — scale to 8 emulators on 8 GPUs:
+
+```bash
+NUM_EMULATORS=8 NUM_GPUS=8 GPUS="[0,1,2,3,4,5,6,7]" bash opentinker/scripts/run_android.sh setup-avds
+# Then run scheduler / simulator / env / client with the same env vars
+```
+
+---
+
 ## Troubleshooting
 
 *   **"KVM is not found"**: Ensure virtualization is enabled in your BIOS/Hypervisor. On Linux, check permissions for `/dev/kvm`. If in a container, run with `--device /dev/kvm`.
