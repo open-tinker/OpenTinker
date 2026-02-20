@@ -278,6 +278,9 @@ class GameEnvironment(BaseEnvironment):
         config = {}
 
         if self._interaction_config_path:
+            default_agent_loop = getattr(
+                self.game_class, "agent_loop_name", "generic_agent"
+            )
             config["actor_rollout_ref"] = {
                 "rollout": {
                     "multi_turn": {
@@ -285,7 +288,7 @@ class GameEnvironment(BaseEnvironment):
                         # Include content for cross-node transmission
                         "interaction_config_content": self._interaction_config_content,
                     },
-                    "agent": {"default_agent_loop": "generic_agent"},
+                    "agent": {"default_agent_loop": default_agent_loop},
                 },
             }
 

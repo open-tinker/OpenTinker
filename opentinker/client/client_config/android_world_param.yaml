@@ -1,0 +1,89 @@
+# AndroidWorld Training Configuration
+# Use with: python android_world_rl.py
+
+# Project settings
+project_name: opentinker
+experiment_name: android_world_ppo_training
+
+# Logging
+logger_backends: ["console", "wandb"]
+
+# Tracing (optional)
+enable_tracing: true
+weave_project: null
+
+# WandB (optional)
+wandb_key: null
+
+# Model and tokenizer
+tokenizer_path: null
+
+# Training parameters
+batch_size: 4
+num_workers: 4
+# Training duration - set ONE of these (num_steps takes precedence if both set)
+num_epochs: null # Number of epochs (null = use num_steps)
+num_steps: 1000 # Total training steps (null = use num_epochs)
+save_freq: 20000
+test_freq: 10 # Validation frequency (every N steps)
+
+# Validation parameters
+val_batch_size: 4 # Total validation samples (matches batch_size for 4 emulators)
+
+# Model parameters
+# Generation parameters
+temperature: 1 # Lower temperature for more focused responses
+top_p: 1
+max_new_tokens: 8192 # TOTAL response budget for entire multi-turn trajectory (NOT per-turn!)
+max_prompt_tokens: 4096
+
+# Algorithm (must be agent_loop for multi-turn)
+algorithm: "agent_loop"
+
+# RL Algorithm settings (passed to server via scheduler)
+# adv_estimator options:
+#   - "grpo"          : Standard GRPO (outcome-only advantage, requires rollout_n > 1)
+#   - "grpo_per_step" : Per-step GRPO with return-based advantages (for multi-turn tasks)
+#   - "gae"           : Generalized Advantage Estimation (for PPO, works with rollout_n = 1)
+# NOTE: For AndroidWorld with single emulator, use "gae" (PPO) since GRPO requires
+# multiple rollouts which would conflict on the single emulator.
+adv_estimator: "gae"
+# rollout_n: For PPO (gae), rollout_n is always 1 (forced by server)
+rollout_n: 1
+
+# Server-side agent loop workers (should match number of emulators)
+agent_num_workers: 4
+
+# Interaction configuration
+interaction:
+  name: android_world
+  class_path: opentinker.environment.gym_environment_interaction.GymEnvironmentInteraction
+  config:
+    env_host: 0.0.0.0
+    env_port: 8092
+    env_endpoint: http://${interaction.config.env_host}:${interaction.config.env_port}
+    # Number of env server shards (should match --shards N and number of emulators)
+    env_shards: 4
+    # Bind each worker to a specific endpoint (1-to-1 worker <-> endpoint)
+    # Requires agent_num_workers == env_shards. Each worker gets its own emulator.
+    bind_worker_to_endpoint: true
+    max_steps: 20 # AndroidWorld episodes max steps
+    max_total_steps: 20 # Max environment step calls (controls rollout turns)
+    observation_template: "{observation}"
+    # AndroidWorld specific settings
+    split: train # train, eval_in_distribution, eval_out_of_distribution
+
+multi_turn:
+  max_user_turns: ${interaction.config.max_total_steps}
+  max_assistant_turns: ${interaction.config.max_total_steps}
+  max_tokens_per_turn: 512 # Per-turn response limit (optional, null for no limit)
+  # Weave tracing (optional - runs on SERVER side)
+  weave_project: null
+  experiment_name: "android_world_interaction"
+
+# Scheduler settings
+scheduler_url: "http://0.0.0.0:8780"
+scheduler_api_key: null
+
+# GPU settings
+num_gpus: 4

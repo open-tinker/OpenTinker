@@ -72,6 +72,10 @@ class AbstractGame(ABC):
                 return {"initial_moves": self._random_moves()}
     """
 
+    # Agent loop name for server rollout (used when building get_config()).
+    # Override to "android_agent" etc. for task-specific agent loops.
+    agent_loop_name: str = "generic_agent"
+
     # =========================================================================
     # REQUIRED: Game Logic Methods
     # =========================================================================

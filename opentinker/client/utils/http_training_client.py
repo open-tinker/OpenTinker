@@ -638,6 +638,19 @@ class ServiceClient:
                 f"[ServiceClient] Passing multi_turn config to server: {multi_turn_cfg}"
             )
 
+        # Override agent num_workers if specified (important for single-resource envs like AndroidWorld)
+        agent_num_workers = getattr(args, "agent_num_workers", None)
+        if agent_num_workers is not None:
+            server_cfg = OmegaConf.merge(
+                server_cfg,
+                OmegaConf.create(
+                    {"actor_rollout_ref": {"rollout": {"agent": {"num_workers": agent_num_workers}}}}
+                ),
+            )
+            print(
+                f"[ServiceClient] Overriding agent num_workers to: {agent_num_workers}"
+            )
+
         generation_config = {
             "temperature": args.temperature,
             "top_p": args.top_p,

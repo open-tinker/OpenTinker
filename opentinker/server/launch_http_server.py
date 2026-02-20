@@ -123,7 +123,7 @@ def main(cfg):
         cfg.trainer.save_freq = 500
         cfg.trainer.test_freq = 500
         cfg.trainer.total_epochs = 15
-        cfg.trainer.default_local_dir = "/workspace/verl/verl/ckpts"
+        cfg.trainer.default_local_dir = "./ckpt"
 
     # ---------------------------------------------------------
     # Agent Loop Configuration

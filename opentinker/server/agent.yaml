@@ -1,2 +1,5 @@
 - name: generic_agent
   _target_: opentinker.server.generic_agent_loop.GenericAgentLoop
+
+- name: android_agent
+  _target_: opentinker.server.android_agent_loop.AndroidAgentLoop

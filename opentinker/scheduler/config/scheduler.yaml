@@ -16,6 +16,9 @@ num_ports: 50
 # Port for the scheduler server itself
 scheduler_port: 8765
 
+# Directory for training job stdout/stderr logs
+logs_dir: ./scheduler_logs
+
 # Authentication settings
 enable_auth: false # Set to false to disable authentication
 

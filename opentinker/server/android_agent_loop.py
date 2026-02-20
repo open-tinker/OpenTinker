@@ -11,7 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Generic Agent Loop for LLM-Environment Interaction.
+"""Android Agent Loop for LLM-Environment Interaction.
 
 This module provides a simplified agent loop for multi-turn interactions
 between LLMs and external environments (e.g., OpenAI Gym-like APIs).
@@ -78,8 +78,8 @@ def _deserialize_images(image_data):
     return result
 
 
-class GenericAgentState(Enum):
-    """States for the generic agent loop."""
+class AndroidAgentState(Enum):
+    """States for the Android agent loop."""
 
     PENDING = "pending"  # Initial state, preparing the prompt
     GENERATING = "generating"  # LLM is generating response
@@ -87,8 +87,8 @@ class GenericAgentState(Enum):
     TERMINATED = "terminated"  # Rollout complete
 
 
-class GenericAgentData:
-    """Encapsulates all state variables for the generic agent loop.
+class AndroidAgentData:
+    """Encapsulates all state variables for the Android agent loop.
 
     This is similar to AgentData in tool_agent_loop.py but without tool-specific fields.
     """
@@ -112,7 +112,10 @@ class GenericAgentData:
         self.image_data = image_data
 
         # Token sequences
+        # prompt_ids: full accumulated sequence (system, user, assistant, user, ...) for final output/loss
         self.prompt_ids: list[int] = []
+        # generation_prompt_ids: what the model sees each time (system + latest user only)
+        self.generation_prompt_ids: list[int] = []
         self.response_ids: list[int] = []
         self.response_mask: list[int] = []
         self.response_logprobs: list[float] = []
@@ -124,13 +127,17 @@ class GenericAgentData:
         # Reward tracking (for turn-level rewards, accumulated for final reward)
         self.turn_scores: list[float] = []
 
+        # Per-turn data for per-turn training mode
+        # Each entry: {generation_prompt_ids, response_ids, response_logprobs, reward}
+        self.per_turn_data: list[dict[str, Any]] = []
+
         # Extra fields for additional data
         self.extra_fields: dict[str, Any] = {}
 
 
-# @register("generic_agent")
-class GenericAgentLoop(AgentLoopBase):
-    """Generic agent loop for LLM-environment interaction.
+# @register("Android_agent")
+class AndroidAgentLoop(AgentLoopBase):
+    """Android agent loop for LLM-environment interaction.
 
     This agent loop handles multi-turn conversations between an LLM and
     an external environment. The environment is accessed through a
@@ -159,7 +166,7 @@ class GenericAgentLoop(AgentLoopBase):
         if cls._class_initialized:
             return
         cls._class_initialized = True
-        print("Performing class-level GenericAgentLoop initialization")
+        print("Performing class-level AndroidAgentLoop initialization")
 
         cls.tokenizer = tokenizer
         cls.processor = processor
@@ -178,6 +185,22 @@ class GenericAgentLoop(AgentLoopBase):
         cls.max_tokens_per_turn = config.actor_rollout_ref.rollout.multi_turn.get(
             "max_tokens_per_turn", None
         )
+
+        # Per-turn training mode: each interaction turn becomes a separate training sample
+        # instead of concatenating all turns into one long sequence
+        cls.per_turn_training = config.actor_rollout_ref.rollout.multi_turn.get(
+            "per_turn_training", False
+        )
+        # Per-turn reward gamma: when > 0, replace immediate turn rewards with
+        # discounted cumulative returns so earlier turns can sense final outcome
+        cls.per_turn_reward_gamma = config.actor_rollout_ref.rollout.multi_turn.get(
+            "per_turn_reward_gamma", 0.0
+        )
+        if cls.per_turn_training:
+            print(
+                f"[AndroidAgentLoop] Per-turn training mode ENABLED: each turn becomes a separate training sample"
+                f" (reward_gamma={cls.per_turn_reward_gamma})"
+            )
 
         # Pre-compute system prompt tokens for later stripping
         cls.system_prompt = tokenizer.apply_chat_template(
@@ -208,7 +231,7 @@ class GenericAgentLoop(AgentLoopBase):
                 f.write(interaction_config_content)
             cls.interaction_config_file = local_path
             print(
-                f"[GenericAgentLoop] Created local interaction config from content: {local_path}"
+                f"[AndroidAgentLoop] Created local interaction config from content: {local_path}"
             )
 
         if cls.interaction_config_file:
@@ -229,16 +252,16 @@ class GenericAgentLoop(AgentLoopBase):
             cls._process_id = os.getpid()  # Store process ID for unique trace naming
             Path(cls._trace_output_dir).mkdir(parents=True, exist_ok=True)
             print(
-                f"[GenericAgentLoop] Rollout trace saving ENABLED: {cls._trace_output_dir} (PID: {cls._process_id})"
+                f"[AndroidAgentLoop] Rollout trace saving ENABLED: {cls._trace_output_dir} (PID: {cls._process_id})"
             )
         else:
             cls._save_traces = False
             print(
-                "[GenericAgentLoop] Rollout trace saving DISABLED (set ROLLOUT_TRACE_DIR to enable)"
+                "[AndroidAgentLoop] Rollout trace saving DISABLED (set ROLLOUT_TRACE_DIR to enable)"
             )
 
         # Initialize Weave tracing on server side
-        # Enabled via WEAVE_PROJECT env var (e.g., "opentinker/generic-env")
+        # Enabled via WEAVE_PROJECT env var (e.g., "opentinker/Android-env")
         # or via config.actor_rollout_ref.rollout.multi_turn.weave_project
         weave_project = os.environ.get("WEAVE_PROJECT", None)
         if weave_project is None:
@@ -260,11 +283,11 @@ class GenericAgentLoop(AgentLoopBase):
                     token2text=True,
                 )
                 print(
-                    f"[GenericAgentLoop] Weave tracing ENABLED: project={weave_project}, experiment={experiment_name}"
+                    f"[AndroidAgentLoop] Weave tracing ENABLED: project={weave_project}, experiment={experiment_name}"
                 )
             except ImportError:
                 print(
-                    "[GenericAgentLoop] WARNING: Weave not installed (pip install weave)"
+                    "[AndroidAgentLoop] WARNING: Weave not installed (pip install weave)"
                 )
             except Exception as e:
                 logger.warning(f"Failed to init Weave: {e}")
@@ -315,7 +338,7 @@ class GenericAgentLoop(AgentLoopBase):
         # This follows the verl pattern from single_turn_agent_loop.py
         multi_modal_data_raw = kwargs.get("multi_modal_data")
         print(
-            f"[GenericAgentLoop DEBUG] multi_modal_data type: {type(multi_modal_data_raw)}, value: {multi_modal_data_raw!r:.200}"
+            f"[AndroidAgentLoop DEBUG] multi_modal_data type: {type(multi_modal_data_raw)}, value: {multi_modal_data_raw!r:.200}"
         )
 
         if isinstance(multi_modal_data_raw, dict):
@@ -329,11 +352,11 @@ class GenericAgentLoop(AgentLoopBase):
             image_data = _deserialize_images(image_data)
 
         print(
-            f"[GenericAgentLoop DEBUG] image_data type: {type(image_data)}, is_list: {isinstance(image_data, list)}"
+            f"[AndroidAgentLoop DEBUG] image_data type: {type(image_data)}, is_list: {isinstance(image_data, list)}"
         )
         if image_data:
             print(
-                f"[GenericAgentLoop DEBUG] image_data[0] type: {type(image_data[0]) if len(image_data) > 0 else 'empty'}"
+                f"[AndroidAgentLoop DEBUG] image_data[0] type: {type(image_data[0]) if len(image_data) > 0 else 'empty'}"
             )
 
         # Debug: Save images if SAVE_DEBUG_IMAGES is set
@@ -384,7 +407,7 @@ class GenericAgentLoop(AgentLoopBase):
                     )
 
         # Create agent data to track state
-        agent_data = GenericAgentData(
+        agent_data = AndroidAgentData(
             messages=messages,
             metrics=metrics,
             request_id=request_id,
@@ -400,22 +423,22 @@ class GenericAgentLoop(AgentLoopBase):
             agent_data.extra_fields["initial_board_state"] = initial_board_state
 
         # State machine loop
-        state = GenericAgentState.PENDING
+        state = AndroidAgentState.PENDING
         try:
-            while state != GenericAgentState.TERMINATED:
-                if state == GenericAgentState.PENDING:
+            while state != AndroidAgentState.TERMINATED:
+                if state == AndroidAgentState.PENDING:
                     state = await self._handle_pending_state(
                         agent_data, sampling_params
                     )
-                elif state == GenericAgentState.GENERATING:
+                elif state == AndroidAgentState.GENERATING:
                     state = await self._handle_generating_state(
                         agent_data, sampling_params
                     )
-                elif state == GenericAgentState.INTERACTING:
+                elif state == AndroidAgentState.INTERACTING:
                     state = await self._handle_interacting_state(agent_data)
                 else:
                     logger.error(f"Invalid state: {state}")
-                    state = GenericAgentState.TERMINATED
+                    state = AndroidAgentState.TERMINATED
         finally:
             # CRITICAL: Always finalize interaction to release resources
             if agent_data.interaction is not None:
@@ -427,13 +450,16 @@ class GenericAgentLoop(AgentLoopBase):
             : len(agent_data.prompt_ids) - len(agent_data.response_mask)
         ]
 
-        # Truncate prompt_ids if they exceed prompt_length (left truncate to keep recent context)
-        # This prevents tensor size mismatches in verl's batch processing when context overflows
-        if len(prompt_ids) > self.prompt_length:
+        # Truncate prompt_ids if they exceed steps * prompt_length (left truncate to keep recent context).
+        # Each generation uses prompt <= prompt_length; total prefix is at most steps * prompt_length.
+        max_total_prompt = self.prompt_length * max(
+            self.max_assistant_turns or 1, self.max_user_turns or 1
+        )
+        if len(prompt_ids) > max_total_prompt:
             logger.warning(
-                f"[GenericAgentLoop] Truncating prompt from {len(prompt_ids)} to {self.prompt_length} tokens"
+                f"[AndroidAgentLoop] Truncating prompt from {len(prompt_ids)} to {max_total_prompt} tokens (steps * prompt_length)"
             )
-            prompt_ids = prompt_ids[-self.prompt_length :]
+            prompt_ids = prompt_ids[-max_total_prompt:]
 
         # Calculate final reward (sum of all turn scores)
         # Return 0.0 if no turn scores collected - this prevents fallback to naive reward loop
@@ -470,6 +496,67 @@ class GenericAgentLoop(AgentLoopBase):
             if key not in output.extra_fields:
                 output.extra_fields[key] = value
 
+        # Build per-turn outputs for per-turn training mode
+        # Each turn becomes a separate training sample with its own prompt, response, and reward.
+        # This avoids concatenating all turns into one long sequence that exceeds context limits.
+        if self.per_turn_training and agent_data.per_turn_data:
+            # Drop the last per_turn_data entry if it has reward=0.0 (never went through INTERACTING).
+            # This happens when the loop terminates in GENERATING state (e.g., max_assistant_turns exceeded).
+            # A reward=0.0 sample provides no gradient signal and dilutes the actual rewards.
+            if (
+                len(agent_data.per_turn_data) > 0
+                and agent_data.per_turn_data[-1]['reward'] == 0.0
+                and len(agent_data.per_turn_data) > len(agent_data.turn_scores)
+            ):
+                dropped = agent_data.per_turn_data.pop()
+                logger.info(
+                    f"[AndroidAgentLoop] Dropped last per-turn sample with reward=0.0 "
+                    f"(never reached INTERACTING state)"
+                )
+            # Compute per-turn rewards: either raw immediate rewards or cumulative
+            # discounted returns (when per_turn_reward_gamma > 0).
+            # Cumulative returns propagate the final outcome signal (e.g., +10.0 for
+            # success) back to earlier turns, enabling cross-turn credit assignment
+            # that GAE alone cannot provide in per-turn mode.
+            immediate_rewards = [t['reward'] for t in agent_data.per_turn_data]
+            if self.per_turn_reward_gamma > 0 and len(immediate_rewards) > 1:
+                gamma = self.per_turn_reward_gamma
+                cumulative_returns = [0.0] * len(immediate_rewards)
+                G = 0.0
+                for i in reversed(range(len(immediate_rewards))):
+                    G = immediate_rewards[i] + gamma * G
+                    cumulative_returns[i] = G
+                per_turn_rewards = cumulative_returns
+            else:
+                per_turn_rewards = immediate_rewards
+
+            per_turn_agent_outputs = []
+            for turn_data, reward in zip(agent_data.per_turn_data, per_turn_rewards):
+                turn_response_ids = turn_data['response_ids'][:self.response_length]
+                turn_logprobs = turn_data['response_logprobs'][:self.response_length] if turn_data['response_logprobs'] else None
+                turn_output = AgentLoopOutput(
+                    prompt_ids=turn_data['generation_prompt_ids'],
+                    response_ids=turn_response_ids,
+                    response_mask=[1] * len(turn_response_ids),
+                    response_logprobs=turn_logprobs,
+                    multi_modal_data={"image": agent_data.image_data} if agent_data.image_data else {},
+                    reward_score=reward,
+                    num_turns=1,
+                    metrics=agent_data.metrics,
+                    extra_fields={
+                        "reward_extra_info": {"acc": None},
+                        "env_info": [],
+                        "turn_scores": [turn_data['reward']],  # Keep original immediate reward for logging
+                    },
+                )
+                per_turn_agent_outputs.append(turn_output)
+            output.extra_fields['per_turn_outputs'] = per_turn_agent_outputs
+            logger.info(
+                f"[AndroidAgentLoop] Per-turn training: {len(per_turn_agent_outputs)} turns "
+                f"(immediate_rewards: {[round(r, 4) for r in immediate_rewards]}, "
+                f"training_rewards: {[round(r, 4) for r in per_turn_rewards]})"
+            )
+
         # Save rollout trace for verification (if enabled via ROLLOUT_TRACE_DIR env var)
         if self._save_traces:
             await self._save_rollout_trace(agent_data, output, request_id, step)
@@ -477,8 +564,10 @@ class GenericAgentLoop(AgentLoopBase):
         return output
 
     async def _handle_pending_state(
-        self, agent_data: GenericAgentData, sampling_params: dict[str, Any]
-    ) -> GenericAgentState:
+        self,
+        agent_data: AndroidAgentData,
+        sampling_params: dict[str, Any],
+    ) -> AndroidAgentState:
         """Handle the pending state: tokenize the initial prompt."""
         if self.processor is not None:
             raw_prompt = await self.loop.run_in_executor(
@@ -507,11 +596,15 @@ class GenericAgentLoop(AgentLoopBase):
                     **self.apply_chat_template_kwargs,
                 ),
             )
-        return GenericAgentState.GENERATING
+        # First turn: generation sees the same prompt as full (system + initial user)
+        agent_data.generation_prompt_ids = list(agent_data.prompt_ids)
+        return AndroidAgentState.GENERATING
 
     async def _handle_generating_state(
-        self, agent_data: GenericAgentData, sampling_params: dict[str, Any]
-    ) -> GenericAgentState:
+        self,
+        agent_data: AndroidAgentData,
+        sampling_params: dict[str, Any],
+    ) -> AndroidAgentState:
         """Handle the generating state: generate LLM response.
 
         The generated tokens are marked with mask=1 (included in loss computation).
@@ -525,9 +618,9 @@ class GenericAgentLoop(AgentLoopBase):
         total_context_budget = self.prompt_length + self.response_length
         min_generation_tokens = 16  # Minimum tokens needed for meaningful generation
 
-        if len(agent_data.prompt_ids) + min_generation_tokens > total_context_budget:
+        if len(agent_data.generation_prompt_ids) + min_generation_tokens > total_context_budget:
             logger.warning(
-                f"[GenericAgentLoop] Context overflow detected: prompt_len={len(agent_data.prompt_ids)}, "
+                f"[AndroidAgentLoop] Context overflow detected: prompt_len={len(agent_data.generation_prompt_ids)}, "
                 f"total_budget={total_context_budget}. Terminating early to avoid negative max_tokens error."
             )
             # Add a placeholder response if none exists yet (so we have valid output)
@@ -538,26 +631,50 @@ class GenericAgentLoop(AgentLoopBase):
                     agent_data.response_ids = [eos_token_id]
                     agent_data.prompt_ids.append(eos_token_id)
                     agent_data.response_mask.append(1)
-            return GenericAgentState.TERMINATED
+            return AndroidAgentState.TERMINATED
 
         print(
-            f"[GenericAgentLoop DEBUG] _handle_generating_state START: request_id={agent_data.request_id}, prompt_len={len(agent_data.prompt_ids)}"
+            f"[AndroidAgentLoop DEBUG] _handle_generating_state START: request_id={agent_data.request_id}, prompt_len={len(agent_data.prompt_ids)}"
         )
         start_time = time.time()
         with simple_timer("generate_sequences", agent_data.metrics):
             print(
-                f"[GenericAgentLoop DEBUG] Calling server_manager.generate() with image_data={agent_data.image_data is not None}..."
+                f"[AndroidAgentLoop DEBUG] Calling server_manager.generate() with image_data={agent_data.image_data is not None}..."
             )
             # CRITICAL: Pass image_data to vLLM for VL model inference
-            output = await self.server_manager.generate(
-                request_id=agent_data.request_id,
-                prompt_ids=agent_data.prompt_ids,
-                sampling_params=sampling_params,
-                image_data=agent_data.image_data,
-            )
+            try:
+                output = await self.server_manager.generate(
+                    request_id=agent_data.request_id,
+                    prompt_ids=agent_data.generation_prompt_ids,
+                    sampling_params=sampling_params,
+                    image_data=agent_data.image_data,
+                )
+            except Exception as e:
+                # Before re-raising: decode and print the full input for debugging
+                import sys
+                n_tokens = len(agent_data.generation_prompt_ids)
+                msg = (
+                    f"[AndroidAgentLoop] generate() failed: {type(e).__name__}: {e}\n"
+                    f"[AndroidAgentLoop] prompt_ids len={n_tokens} (full accumulated multi-turn prompt; each BEGIN/END block below = one worker's dump)\n"
+                    "--- BEGIN full decoded prompt (for debug) ---"
+                )
+                sys.stderr.write(msg)
+                sys.stderr.flush()
+                try:
+                    decoded = self.tokenizer.decode(
+                        agent_data.generation_prompt_ids, skip_special_tokens=True
+                    )
+                    sys.stderr.write(decoded)
+                    sys.stderr.write("\n--- END full decoded prompt ---\
+")
+                    sys.stderr.flush()
+                except Exception as decode_err:
+                    sys.stderr.write(f"[AndroidAgentLoop] decode failed: {decode_err}\n")
+                    sys.stderr.flush()
+                raise
             elapsed = time.time() - start_time
             print(
-                f"[GenericAgentLoop DEBUG] server_manager.generate() COMPLETED in {elapsed:.2f}s, response_tokens={len(output.token_ids) if output else 0}"
+                f"[AndroidAgentLoop DEBUG] server_manager.generate() COMPLETED in {elapsed:.2f}s, response_tokens={len(output.token_ids) if output else 0}"
             )
 
         agent_data.assistant_turns += 1
@@ -585,19 +702,28 @@ class GenericAgentLoop(AgentLoopBase):
         if response_log_probs:
             agent_data.response_logprobs += response_log_probs
 
+        # Collect per-turn data for per-turn training mode
+        if self.per_turn_training:
+            agent_data.per_turn_data.append({
+                'generation_prompt_ids': list(agent_data.generation_prompt_ids),
+                'response_ids': list(response_token_ids),
+                'response_logprobs': list(response_log_probs) if response_log_probs else [],
+                'reward': 0.0,  # Will be updated in INTERACTING state when env provides reward
+            })
+
         # Check termination conditions
-        if len(agent_data.response_mask) >= self.response_length:
-            return GenericAgentState.TERMINATED
+        if len(agent_data.response_ids) >= self.response_length:
+            return AndroidAgentState.TERMINATED
         # Use > instead of >= so that max_assistant_turns=1 allows 1 generation + 1 step
         # before terminating (instead of terminating immediately after first generation)
         if (
             self.max_assistant_turns
             and agent_data.assistant_turns > self.max_assistant_turns
         ):
-            return GenericAgentState.TERMINATED
+            return AndroidAgentState.TERMINATED
         # Similarly, max_user_turns=1 means user can ask once, then terminate after next generation
         if self.max_user_turns and agent_data.user_turns > self.max_user_turns:
-            return GenericAgentState.TERMINATED
+            return AndroidAgentState.TERMINATED
 
         # Add assistant message to conversation history
         if agent_data.interaction is not None:
@@ -610,14 +736,15 @@ class GenericAgentLoop(AgentLoopBase):
             agent_data.messages.append(
                 {"role": "assistant", "content": assistant_message}
             )
-            return GenericAgentState.INTERACTING
+            return AndroidAgentState.INTERACTING
         else:
             # No interaction configured, terminate after first generation
-            return GenericAgentState.TERMINATED
+            return AndroidAgentState.TERMINATED
 
     async def _handle_interacting_state(
-        self, agent_data: GenericAgentData
-    ) -> GenericAgentState:
+        self,
+        agent_data: AndroidAgentData,
+    ) -> AndroidAgentState:
         """Handle the interacting state: get response from external environment.
 
         The environment observation is tokenized and marked with mask=0
@@ -638,6 +765,10 @@ class GenericAgentLoop(AgentLoopBase):
         if reward is not None:
             agent_data.turn_scores.append(reward)
 
+            # Update per-turn reward for the last generation
+            if self.per_turn_training and agent_data.per_turn_data:
+                agent_data.per_turn_data[-1]['reward'] = reward
+
         # Store environment info under a SINGLE key to ensure consistent structure
         # across all samples (avoids DataProto.concat assertion errors when different
         # samples return different info keys)
@@ -647,8 +778,15 @@ class GenericAgentLoop(AgentLoopBase):
                 agent_data.extra_fields["env_info"] = []
             agent_data.extra_fields["env_info"].append(info)
 
-        # Construct user message from observation
-        add_messages: list[dict[str, Any]] = [{"role": "user", "content": observation}]
+        # observation may be "long_part<obs>short_part": long part for generation prompt, short for prompt_ids/mask
+        if "<obs>" in observation:
+            observation_long, observation_short = observation.split("<obs>", 1)
+        else:
+            observation_long = observation
+            observation_short = observation
+
+        # Construct user message from full observation (for message history)
+        add_messages: list[dict[str, Any]] = [{"role": "user", "content": observation_short}]
         agent_data.messages.extend(add_messages)
 
         # Tokenize the user message (environment observation)
@@ -676,10 +814,12 @@ class GenericAgentLoop(AgentLoopBase):
         response_ids = response_ids[len(self.system_prompt) :]
 
         # Check if adding these tokens would exceed response length
-        if len(agent_data.response_mask) + len(response_ids) >= self.response_length:
-            return GenericAgentState.TERMINATED
+        # In per-turn training mode, skip this check since each turn is trained independently
+        # and the accumulated response_mask length is irrelevant.
+        if not self.per_turn_training and len(agent_data.response_mask) + len(response_ids) >= self.response_length:
+            return AndroidAgentState.TERMINATED
 
-        # Update prompt_ids and response_mask
+        # Update full prompt_ids and response_mask (accumulated for final output/loss)
         # mask=0 for environment observation tokens (not included in loss)
         agent_data.prompt_ids += response_ids
         agent_data.response_mask += [0] * len(response_ids)
@@ -688,10 +828,43 @@ class GenericAgentLoop(AgentLoopBase):
             # Pad logprobs with 0.0 for observation tokens
             agent_data.response_logprobs += [0.0] * len(response_ids)
 
-        if should_terminate:
-            return GenericAgentState.TERMINATED
+        # Next generation: model sees system + LONG part of observation (full context for generation)
+        system_msg = next(
+            (m for m in agent_data.messages if m.get("role") == "system"),
+            agent_data.messages[0],
+        )
+        minimal_messages = [system_msg, {"role": "user", "content": observation_long}]
+        if self.processor is not None:
+            raw_minimal = await self.loop.run_in_executor(
+                None,
+                lambda: self.processor.apply_chat_template(
+                    minimal_messages,
+                    add_generation_prompt=True,
+                    tokenize=False,
+                    **self.apply_chat_template_kwargs,
+                ),
+            )
+            model_inputs = self.processor(
+                text=[raw_minimal],
+                images=agent_data.image_data if agent_data.image_data else None,
+                return_tensors="pt",
+            )
+            agent_data.generation_prompt_ids = model_inputs.pop("input_ids").squeeze(0).tolist()
         else:
-            return GenericAgentState.GENERATING
+            agent_data.generation_prompt_ids = await self.loop.run_in_executor(
+                None,
+                lambda: self.tokenizer.apply_chat_template(
+                    minimal_messages,
+                    add_generation_prompt=True,
+                    tokenize=True,
+                    **self.apply_chat_template_kwargs,
+                ),
+            )
+
+        if should_terminate:
+            return AndroidAgentState.TERMINATED
+        else:
+            return AndroidAgentState.GENERATING
 
     async def _save_debug_images(self, image_data: list, request_id: str):
         """Save debug images to disk when SAVE_DEBUG_IMAGES env var is set.
@@ -715,8 +888,8 @@ class GenericAgentLoop(AgentLoopBase):
                     )
                     logger.debug(f"Saved debug image to {img_path}")
                 else:
-                    print(
-                        f"[GenericAgentLoop DEBUG] Image {idx} is of type {type(img)}, cannot save"
+                    logger.debug(
+                        f"Image {idx} is of type {type(img)}, cannot save"
                     )
             except Exception as e:
                 logger.debug(f"Failed to save image {idx}: {e}")
@@ -737,7 +910,7 @@ class GenericAgentLoop(AgentLoopBase):
 
     async def _save_rollout_trace(
         self,
-        agent_data: GenericAgentData,
+        agent_data: AndroidAgentData,
         output: AgentLoopOutput,
         request_id: str,
         step: Optional[int] = None,
@@ -752,13 +925,19 @@ class GenericAgentLoop(AgentLoopBase):
         - Per-turn board states (for Gomoku and similar environments)
         """
         try:
-            # Use step + short UUID for trace file naming
-            trace_uuid = request_id[:8]  # Use first 8 chars of request_id as short UUID
+            # Use a sequential counter for ordered filenames
+            # Include request_id prefix to avoid collisions across workers
+            # (each worker process has its own _trace_count starting from 0)
+            req_short = request_id[:8] if request_id else "unknown"
+            with self._trace_lock:
+                self.__class__._trace_count += 1
+                seq = self.__class__._trace_count
 
+            # Format: <seq>_<request_id_short>  (e.g. trace_000001_ab20ea37.json)
             if step is not None:
-                trace_id = f"step_{step:06d}_{trace_uuid}"
+                trace_id = f"{seq:06d}_step{step:06d}_{req_short}"
             else:
-                trace_id = trace_uuid
+                trace_id = f"{seq:06d}_{req_short}"
 
             # Decode text for readability
             prompt_text = await self.loop.run_in_executor(
@@ -856,7 +1035,9 @@ class GenericAgentLoop(AgentLoopBase):
             print(traceback.format_exc())
 
     def _extract_per_turn_board_states(
-        self, messages: list[dict[str, Any]], agent_data: GenericAgentData
+        self,
+        messages: list[dict[str, Any]],
+        agent_data: AndroidAgentData,
     ) -> list[dict[str, Any]]:
         """Extract board states from each message for verification.
 
