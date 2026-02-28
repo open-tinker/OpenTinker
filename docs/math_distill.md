@@ -87,19 +87,20 @@ python opentinker/client/math_distill_rl.py \
 python opentinker/client/math_distill_rl.py \
     tokenizer_path=Qwen/Qwen2.5-1.5B \
     teacher_model_path=Qwen/Qwen2.5-7B-Instruct \
-    batch_size=16 \
-    rollout_n=8 \
+    batch_size=32 \
+    rollout_n=1 \
+    adv_estimator=gae \
     num_epochs=5 \
     save_freq=100 \
     test_freq=5 \
-    adv_estimator=grpo \
     use_kl_in_advantage=true \
-    kl_penalty_coef=0.1 \
+    disable_rl_reward=true \
+    kl_penalty_coef=1 \
     data_path=data/math/train.parquet \
     val_data_path=data/math/test.parquet \
-    scheduler_url=http://<server_endpoint>:<scheduler_port> \
-    interaction.config.env_port=<env_port> \
-    interaction.config.env_host=<client_endpoint>
+    scheduler_url=http://localhost:8780 \
+    interaction.config.env_port=8082 \
+    interaction.config.env_host=localhost
 ```
 
 ### Key arguments
@@ -108,7 +109,8 @@ python opentinker/client/math_distill_rl.py \
 |----------|---------|-------------|
 | `tokenizer_path` | — | Student model (HuggingFace path or local directory) |
 | `teacher_model_path` | `null` | Teacher model path. `null` → use the student's initial weights as teacher (equivalent to pure RLVR) |
-| `use_kl_in_advantage` | `true` | Enable distillation. Set to `false` for pure RL |
+| `use_kl_in_advantage` | `true` | Enable distillation. Set to `false` for pure RL. similar parameters in verl: https://github.com/verl-project/verl/issues/3276 |
+| `disable_rl_reward` | `false` | Disable RL reward signal: zero out base advantages before applying KL penalty. When true (requires use_kl_in_advantage=true), the advantage becomes: A_final = -kl_coef * KL(student || teacher) The model is trained purely to match the teacher distribution, ignoring task reward. |
 | `kl_penalty_coef` | `0.1` | α — weight of KL term. Higher → stay closer to teacher |
 | `adv_estimator` | `grpo` | RL advantage estimator: `grpo`, `gae`, or `grpo_per_step` |
 | `rollout_n` | `16` | Number of rollouts per prompt (for GRPO) |

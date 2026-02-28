@@ -36,6 +36,7 @@ def main(args):
     print(f"  adv_estimator     : {args.adv_estimator}")
     print(f"  use_kl_in_advantage: {args.get('use_kl_in_advantage', False)}")
     print(f"  kl_penalty_coef   : {args.get('kl_penalty_coef', 0.1)}")
+    print(f"  disable_rl_reward : {args.get('disable_rl_reward', False)}")
     print(f"  teacher_model_path: {args.get('teacher_model_path', None)}")
     print("=" * 60)
 
@@ -115,6 +116,7 @@ def main(args):
             "algorithm": {
                 "adv_estimator": args.adv_estimator,
                 "use_kl_in_advantage": bool(args.get("use_kl_in_advantage", False)),
+                "disable_rl_reward": bool(args.get("disable_rl_reward", False)),
                 "kl_ctrl": {
                     "type": "fixed",
                     "kl_coef": float(args.get("kl_penalty_coef", 0.1)),

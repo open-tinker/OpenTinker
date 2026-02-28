@@ -4,5 +4,8 @@ python verl/examples/data_preprocess/math_multiturn_w_interaction.py --local_sav
 
 python verl/examples/data_preprocess/aime2024_multiturn_w_tool.py --local_save_dir ./data/aime2024
 
-docker exec -it tinker bash
+docker exec -it opsd_siqi bash
 cd /workspace/dev/OPSD
+
+# kill program running on port 8082
+kill -9 $(lsof -t -i:8082)

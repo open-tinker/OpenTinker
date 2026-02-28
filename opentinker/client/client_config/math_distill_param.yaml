@@ -33,8 +33,8 @@ save_freq: 100
 test_freq: 50
 
 # Validation parameters
-val_batch_size: 30        # number of unique problems to evaluate
-val_n: 32                 # rollouts per problem; >1 enables pass@k and auto-deduplicates val set
+val_batch_size: 100        # number of unique problems to evaluate
+val_n: 1                 # rollouts per problem; >1 enables pass@k and auto-deduplicates val set
 
 # Generation parameters
 temperature: 0.7
@@ -60,6 +60,12 @@ use_kl_in_advantage: true
 # KL penalty coefficient α.
 # Higher → stay closer to teacher; lower → optimize reward freely.
 kl_penalty_coef: 0.1
+
+# Disable RL reward signal: zero out base advantages before applying KL penalty.
+# When true (requires use_kl_in_advantage=true), the advantage becomes:
+#   A_final = -kl_coef * KL(student || teacher)
+# The model is trained purely to match the teacher distribution, ignoring task reward.
+disable_rl_reward: false
 
 # LoRA configuration
 lora:

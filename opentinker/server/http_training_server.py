@@ -1166,6 +1166,14 @@ class PPOTrainingServerBackend:
                     config=self.config.algorithm,
                 )
 
+                # Disable RL reward: zero out base advantages so only KL drives the update.
+                # Requires use_kl_in_advantage=True; effective formula: A_final = -α * KL
+                if self.config.algorithm.get("disable_rl_reward", False):
+                    assert self.config.algorithm.get("use_kl_in_advantage", False) 
+                    # requires use_kl_in_advantage=True when disable_rl_reward=True
+                    batch.batch["advantages"] = torch.zeros_like(batch.batch["advantages"])
+                    batch.batch["returns"] = torch.zeros_like(batch.batch["returns"])
+
                 # On-policy distillation: add per-token KL penalty to advantage.
                 # A_final = A_base - α * (log π_student - log π_teacher)
                 # Works with any adv_estimator (grpo, gae, grpo_per_step, …).
@@ -1178,7 +1186,7 @@ class PPOTrainingServerBackend:
                     )
                     metrics["distill/kl_per_token"] = kl.mean().item()
                     metrics["distill/kl_coef"] = kl_coef
-
+                
             # 10. Update critic
             if self.use_critic:
                 with marked_timer("update_critic", timing_raw, color="pink"):
