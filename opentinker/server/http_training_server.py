@@ -1588,6 +1588,16 @@ class PPOTrainingServerBackend:
                 "val/min_score": float(np.min(scores)),
             }
 
+            # pass@k: analogous to GRPO's n-sample grouping.
+            # With repeat(val_n, interleave=True), every val_n consecutive scores
+            # come from the same prompt — mirror the uid-based GRPO grouping.
+            val_n = self.config.actor_rollout_ref.rollout.val_kwargs.n
+            if val_n > 1 and len(scores) >= val_n:
+                n_prompts = len(scores) // val_n
+                scores_arr = np.array(scores[: n_prompts * val_n]).reshape(n_prompts, val_n)
+                pass_at_k = float(np.mean(np.max(scores_arr, axis=1) >= 0.5))
+                metrics[f"val/pass_at_{val_n}"] = pass_at_k
+
             # Add extra metrics from reward function
             if "reward_extra_info" in result:
                 for key, values in result["reward_extra_info"].items():

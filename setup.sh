@@ -3,3 +3,6 @@ python verl/examples/data_preprocess/dapo_multiturn_w_tool.py --local_save_dir .
 python verl/examples/data_preprocess/math_multiturn_w_interaction.py --local_save_dir ./data/math_agentloop
 
 python verl/examples/data_preprocess/aime2024_multiturn_w_tool.py --local_save_dir ./data/aime2024
+
+docker exec -it tinker bash
+cd /workspace/dev/OPSD

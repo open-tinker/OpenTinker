@@ -80,6 +80,7 @@ class StaticDatasetGenerator(AbstractGameDataGenerator):
         seed: Optional[int] = None,
         cache_dir: Optional[str] = None,
         system_prompt: Optional[str] = None,
+        deduplicate: bool = False,
     ):
         # Normalize data_paths to list
         if isinstance(data_paths, str):
@@ -98,6 +99,7 @@ class StaticDatasetGenerator(AbstractGameDataGenerator):
         self.cache_dir = cache_dir or os.path.expanduser("~/.cache/verl/static_data")
 
         self.system_prompt = system_prompt
+        self.deduplicate = deduplicate
 
         # Thread-safe state
         self._lock = threading.Lock()
@@ -141,6 +143,17 @@ class StaticDatasetGenerator(AbstractGameDataGenerator):
                 all_samples.append(sample)
 
             logger.info(f"Loaded {len(dataset)} samples from {data_path}")
+
+        if self.deduplicate:
+            seen: set = set()
+            deduped = []
+            for s in all_samples:
+                key = str(s.get(self.prompt_key, ""))
+                if key not in seen:
+                    seen.add(key)
+                    deduped.append(s)
+            logger.info(f"Deduplication: {len(all_samples)} → {len(deduped)} unique samples")
+            all_samples = deduped
 
         self._samples = all_samples
         self._indices = list(range(len(all_samples)))

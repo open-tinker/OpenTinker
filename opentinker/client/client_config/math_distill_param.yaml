@@ -33,12 +33,13 @@ save_freq: 100
 test_freq: 50
 
 # Validation parameters
-val_batch_size: 100
+val_batch_size: 30        # number of unique problems to evaluate
+val_n: 32                 # rollouts per problem; >1 enables pass@k and auto-deduplicates val set
 
 # Generation parameters
 temperature: 0.7
 top_p: 1
-max_new_tokens: 4098
+max_new_tokens: 8194
 max_prompt_tokens: 4096
 
 # Algorithm
@@ -81,7 +82,7 @@ interaction:
 multi_turn:
   max_user_turns: 0
   max_assistant_turns: 1
-  max_tokens_per_turn: 4096
+  max_tokens_per_turn: 8192
   weave_project: null
   experiment_name: "math_distill_interaction"
 

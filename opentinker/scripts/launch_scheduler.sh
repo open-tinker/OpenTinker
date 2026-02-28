@@ -12,9 +12,11 @@
 # export FLASHINFER_HOMOGENEOUS_MS=1
 
 export ROLLOUT_TRACE_DIR="/workspace/logs"
+mkdir -p "$ROLLOUT_TRACE_DIR"
+
 
 # Default configuration
-AVAILABLE_GPUS="[0,1,2,3]"
+AVAILABLE_GPUS="[4,5,8,9]"
 PORT_RANGE="null"  # Set to null for auto-detection
 NUM_PORTS=200
 SCHEDULER_PORT=8780

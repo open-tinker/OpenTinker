@@ -105,6 +105,7 @@ class MathGameEnvironment(GameEnvironment):
                 shuffle=False,  # No shuffle - keep samples fixed
                 seed=42,
                 system_prompt=math_game_for_prompt.get_system_prompt(),
+                deduplicate=getattr(self.config, "val_n", 1) > 1,
             )
             val_batch_size = getattr(
                 self.config, "val_batch_size", min(64, len(val_generator))

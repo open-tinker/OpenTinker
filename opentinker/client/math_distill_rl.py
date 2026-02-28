@@ -132,6 +132,16 @@ def main(args):
     else:
         print("✓ Teacher model: initial student checkpoint (same model)")
 
+    # Validation sampling: enable stochastic rollouts for pass@k
+    val_n = int(args.get("val_n", 1))
+    if val_n > 1:
+        with open_dict(server_cfg):
+            server_cfg.actor_rollout_ref.rollout.val_kwargs = OmegaConf.create({
+                "n": val_n,
+                "do_sample": True,
+            })
+        print(f"✓ Validation: pass@{val_n} mode (stochastic sampling)")
+
     # multi_turn config
     if hasattr(args, "multi_turn") and args.multi_turn:
         multi_turn_cfg = OmegaConf.to_container(args.multi_turn, resolve=True)
