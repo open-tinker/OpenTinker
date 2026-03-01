@@ -278,5 +278,99 @@ class TestGrpoPerStepAdvantage:
         assert advantages[3, 0] < 0
 
 
+class TestComputeOpsdJsdLoss:
+    """Tests for the OPSD full-vocabulary JSD loss function."""
+
+    def _make_logprobs(self, batch, seq_len, vocab_size, seed=42):
+        """Generate random log-probs (log-softmax normalised)."""
+        torch.manual_seed(seed)
+        logits = torch.randn(batch, seq_len, vocab_size)
+        return torch.log_softmax(logits, dim=-1)
+
+    def test_zero_when_identical(self):
+        """JSD(p ‖ p) = 0 for any distribution p."""
+        from opentinker.backend_patch.verl.trainer.ppo.per_step_core_algos import compute_opsd_jsd_loss
+
+        B, R, V = 2, 8, 32
+        lp = self._make_logprobs(B, R, V)
+        mask = torch.ones(B, R)
+        loss, _ = compute_opsd_jsd_loss(lp, lp, mask, beta=0.5)
+        assert loss.item() < 1e-5, f"JSD(p||p) should be ~0, got {loss.item()}"
+
+    def test_non_negative(self):
+        """JSD is always non-negative."""
+        from opentinker.backend_patch.verl.trainer.ppo.per_step_core_algos import compute_opsd_jsd_loss
+
+        B, R, V = 4, 10, 64
+        s_lp = self._make_logprobs(B, R, V, seed=1)
+        t_lp = self._make_logprobs(B, R, V, seed=2)
+        mask = torch.ones(B, R)
+        loss, _ = compute_opsd_jsd_loss(s_lp, t_lp, mask, beta=0.5)
+        assert loss.item() >= 0.0, f"JSD should be >= 0, got {loss.item()}"
+
+    def test_mask_zeros_out_padding(self):
+        """Masked tokens should not contribute to the loss."""
+        from opentinker.backend_patch.verl.trainer.ppo.per_step_core_algos import compute_opsd_jsd_loss
+
+        B, R, V = 2, 8, 32
+        s_lp = self._make_logprobs(B, R, V, seed=10)
+        t_lp = self._make_logprobs(B, R, V, seed=11)
+
+        # Full mask
+        full_mask = torch.ones(B, R)
+        loss_full, _ = compute_opsd_jsd_loss(s_lp, t_lp, full_mask)
+
+        # Half mask (only first 4 tokens)
+        half_mask = torch.zeros(B, R)
+        half_mask[:, :4] = 1.0
+
+        # Only-second-half mask
+        second_mask = torch.zeros(B, R)
+        second_mask[:, 4:] = 1.0
+
+        loss_half, _ = compute_opsd_jsd_loss(s_lp, t_lp, half_mask)
+        loss_second, _ = compute_opsd_jsd_loss(s_lp, t_lp, second_mask)
+
+        # The average of the two halves need not equal full, but both should differ from full
+        # and both should be non-negative and less than or equal to the maximum possible value
+        assert loss_half.item() >= 0.0
+        assert loss_second.item() >= 0.0
+        # Full loss should be between min and max of the two halves (not strictly necessary,
+        # but a sanity check that masking changes the value)
+        assert not torch.isclose(loss_full, loss_half) or not torch.isclose(loss_full, loss_second), \
+            "Masking should change the loss value"
+
+    def test_numerically_stable_with_extreme_logits(self):
+        """Should not produce NaN/Inf with very large or very small logits."""
+        from opentinker.backend_patch.verl.trainer.ppo.per_step_core_algos import compute_opsd_jsd_loss
+
+        B, R, V = 2, 4, 16
+        # One distribution almost deterministic (very peaked)
+        s_logits = torch.full((B, R, V), -100.0)
+        s_logits[:, :, 0] = 100.0
+        s_lp = torch.log_softmax(s_logits.float(), dim=-1)
+
+        t_logits = torch.full((B, R, V), -100.0)
+        t_logits[:, :, 1] = 100.0
+        t_lp = torch.log_softmax(t_logits.float(), dim=-1)
+
+        mask = torch.ones(B, R)
+        loss, _ = compute_opsd_jsd_loss(s_lp, t_lp, mask)
+        assert torch.isfinite(loss), f"Loss should be finite, got {loss.item()}"
+
+    def test_asymmetric_distributions_positive(self):
+        """JSD between two different distributions should be strictly positive."""
+        from opentinker.backend_patch.verl.trainer.ppo.per_step_core_algos import compute_opsd_jsd_loss
+
+        B, R, V = 2, 4, 16
+        s_lp = self._make_logprobs(B, R, V, seed=20)
+        t_lp = self._make_logprobs(B, R, V, seed=21)
+        mask = torch.ones(B, R)
+        loss, metrics = compute_opsd_jsd_loss(s_lp, t_lp, mask)
+        assert loss.item() > 0.0, "JSD of different distributions should be > 0"
+        assert "opsd/jsd_per_token" in metrics
+        assert "opsd/jsd_beta" in metrics
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

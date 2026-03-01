@@ -100,15 +100,16 @@ class MathCodeInterpreterEnvironment(GameEnvironment):
         )
         print(f"Training dataloader: {len(self.train_dataloader)} batches")
 
-        # Validation data generator
+        # Validation data generator - randomly sample a fixed subset once per run
         if self.val_data_paths:
+            val_seed = getattr(self.config, "val_seed", 42)
             val_generator = StaticDatasetGenerator(
                 data_paths=self.val_data_paths,
                 interaction_name=self.interaction_name,
                 prompt_key="prompt",
                 ground_truth_key="ground_truth",
-                shuffle=False,
-                seed=42,
+                shuffle=True,  # Shuffle once, then keep the subset fixed during training
+                seed=val_seed,
                 system_prompt=math_game_for_prompt.get_system_prompt(),
             )
             val_batch_size = getattr(
@@ -119,7 +120,7 @@ class MathCodeInterpreterEnvironment(GameEnvironment):
                 tokenizer,
                 dataset_config,
                 virtual_size=val_batch_size,
-                seed=42,
+                seed=val_seed,
             )
             self.val_dataloader = StatefulDataLoader(
                 val_dataset,

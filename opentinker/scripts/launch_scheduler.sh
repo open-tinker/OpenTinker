@@ -16,7 +16,7 @@ mkdir -p "$ROLLOUT_TRACE_DIR"
 
 
 # Default configuration
-AVAILABLE_GPUS="[0,1,2,3,4,5]"
+AVAILABLE_GPUS="[6,7,8,9]"
 PORT_RANGE="null"  # Set to null for auto-detection
 NUM_PORTS=200
 SCHEDULER_PORT=8780

@@ -424,6 +424,10 @@ def build_role_worker_mapping(config):
     from verl.trainer.ppo.utils import need_critic
     import ray
 
+    # Always patch ActorRolloutRefWorker with OPSD method (idempotent, low overhead).
+    # This avoids requiring algorithm.use_opsd=True in the base verl config schema.
+    import opentinker.backend_patch.verl.workers.opsd_worker  # noqa: F401 (side-effect: patch)
+
     role_worker_mapping = {}
 
     # Actor rollout - based on strategy
@@ -433,7 +437,6 @@ def build_role_worker_mapping(config):
                 ActorRolloutRefWorker,
                 AsyncActorRolloutRefWorker,
             )
-
             actor_rollout_cls = (
                 AsyncActorRolloutRefWorker
                 if config.actor_rollout_ref.rollout.mode == "async"
@@ -886,6 +889,7 @@ class PPOTrainingServerBackend:
         try:
             metrics = {}
             timing_raw = {}
+            temperature = float(self.generation_config.get("temperature", 1.0))
 
             # 1. Prepare generation batch
             start_time = time.time()
@@ -1166,11 +1170,19 @@ class PPOTrainingServerBackend:
                     config=self.config.algorithm,
                 )
 
-                # Disable RL reward: zero out base advantages so only KL drives the update.
-                # Requires use_kl_in_advantage=True; effective formula: A_final = -α * KL
+                # Disable RL reward: zero out base advantages so only distillation drives the update.
+                # Requires at least one distillation signal:
+                #   - use_kl_in_advantage (external/initial-teacher KL), OR
+                #   - use_opsd_jsd_in_advantage (OPSD self-distillation JSD)
                 if self.config.algorithm.get("disable_rl_reward", False):
-                    assert self.config.algorithm.get("use_kl_in_advantage", False) 
-                    # requires use_kl_in_advantage=True when disable_rl_reward=True
+                    has_distill = (
+                        self.config.algorithm.get("use_kl_in_advantage", False)
+                        or self.config.algorithm.get("use_opsd_jsd_in_advantage", False)
+                    )
+                    assert has_distill, (
+                        "disable_rl_reward=True requires at least one distillation signal: "
+                        "use_kl_in_advantage=True or use_opsd_jsd_in_advantage=True"
+                    )
                     batch.batch["advantages"] = torch.zeros_like(batch.batch["advantages"])
                     batch.batch["returns"] = torch.zeros_like(batch.batch["returns"])
 
@@ -1186,7 +1198,32 @@ class PPOTrainingServerBackend:
                     )
                     metrics["distill/kl_per_token"] = kl.mean().item()
                     metrics["distill/kl_coef"] = kl_coef
-                
+
+                # OPSD (optional in RL path): add per-token JSD penalty.
+                # A_final = A_base - opsd_jsd_coef * JSD_β(pT ‖ pS)
+                if self.config.algorithm.get("use_opsd_jsd_in_advantage", False):
+                    jsd_coef = float(self.config.algorithm.get("opsd_jsd_coef", 0.1))
+                    rm = batch.batch["response_mask"].float()
+
+                    jsd_per_token, _student_old_log_probs, beta, temperature = self._compute_opsd_stats(
+                        batch=batch,
+                        timing_raw=timing_raw,
+                        timer_name="opsd_teacher_student_jsd",
+                        timer_color="blue",
+                    )
+
+                    device = batch.batch["advantages"].device
+                    jsd_per_token = jsd_per_token.to(device)
+                    rm_device = rm.to(device)
+                    masked_jsd = jsd_per_token * rm_device
+                    n_tokens = rm_device.sum().clamp(min=1)
+                    metrics["opsd/jsd_per_token"] = (masked_jsd.sum() / n_tokens).item()
+                    metrics["opsd/jsd_beta"] = beta
+                    batch.batch["advantages"] = (
+                        batch.batch["advantages"] - jsd_coef * masked_jsd
+                    )
+                    metrics["opsd/jsd_coef"] = jsd_coef
+
             # 10. Update critic
             if self.use_critic:
                 with marked_timer("update_critic", timing_raw, color="pink"):
@@ -1199,6 +1236,7 @@ class PPOTrainingServerBackend:
             # 11. Update actor (check critic warmup)
             if self.config.trainer.critic_warmup <= self.global_steps:
                 with marked_timer("update_actor", timing_raw, color="red"):
+                    batch.meta_info["temperature"] = temperature
                     batch.meta_info["multi_turn"] = (
                         self.config.actor_rollout_ref.rollout.multi_turn.enable
                     )
@@ -1303,6 +1341,164 @@ class PPOTrainingServerBackend:
                 "error": str(e),
                 "traceback": error_traceback,
             }
+
+    def _build_teacher_inputs(
+        self, batch: DataProto, rollout_responses: torch.Tensor
+    ) -> DataProto:
+        """Build teacher-prompted input tensors for OPSD.
+
+        Teacher prompt format:
+            <original messages> + teacher_suffix(reference_answer)
+
+        Args:
+            batch: DataProto with raw_prompt and reward_model ground_truth.
+            rollout_responses: [B, response_len] response token ids from student rollout.
+        Returns:
+            DataProto with teacher input_ids, attention_mask, position_ids, responses.
+        """
+        from verl.utils.model import compute_position_id_with_mask
+
+        max_prompt_len = self.config.data.max_prompt_length
+        batch_size = len(batch)
+        pad_id = self.tokenizer.pad_token_id or 0
+
+        teacher_input_ids_list = []
+        teacher_attention_mask_list = []
+
+        for i in range(batch_size):
+            # Extract privileged information: prefer extra_info["answer"] (full solution)
+            # over reward_model["ground_truth"] (short final answer).
+            # Priority:
+            #   1. extra_info["answer"]  — full step-by-step reference solution
+            #   2. extra_info["ground_truth"] — fallback in extra_info
+            #   3. reward_model["ground_truth"] — short answer (last resort)
+            ground_truth = ""
+            try:
+                extra_info = batch.non_tensor_batch.get("extra_info", None)
+                if extra_info is not None:
+                    ei = extra_info[i]
+                    if isinstance(ei, dict):
+                        if "answer" in ei:
+                            ground_truth = str(ei["answer"])
+                        elif "ground_truth" in ei:
+                            ground_truth = str(ei["ground_truth"])
+            except Exception:
+                pass
+
+            if not ground_truth:
+                try:
+                    gt = batch.non_tensor_batch["reward_model"][i]
+                    if isinstance(gt, dict):
+                        ground_truth = str(gt.get("ground_truth", ""))
+                    else:
+                        ground_truth = str(gt)
+                except Exception:
+                    pass
+
+            # Build teacher messages: clone original messages, append teacher suffix to last user turn
+            raw_prompt = batch.non_tensor_batch.get("raw_prompt", None)
+            messages = list(raw_prompt[i]) if raw_prompt is not None else []
+
+            teacher_suffix = (
+                f"\n\nHere is a reference solution:\n{ground_truth}\n"
+                "After understanding the reference solution, please try to solve this "
+                "problem using your own approach below:"
+            )
+
+            teacher_messages = []
+            found_user = False
+            for j in range(len(messages) - 1, -1, -1):
+                if messages[j].get("role") == "user" and not found_user:
+                    msg = dict(messages[j])
+                    msg["content"] = msg["content"] + teacher_suffix
+                    teacher_messages = messages[:j] + [msg] + messages[j + 1:]
+                    found_user = True
+                    break
+            if not found_user:
+                teacher_messages = messages
+
+            # Tokenize teacher prompt
+            if teacher_messages and hasattr(self.tokenizer, "chat_template") and self.tokenizer.chat_template:
+                teacher_prompt_text = self.tokenizer.apply_chat_template(
+                    teacher_messages, add_generation_prompt=True, tokenize=False,
+                )
+                teacher_prompt_ids = self.tokenizer.encode(
+                    teacher_prompt_text, add_special_tokens=False
+                )
+            else:
+                teacher_prompt_ids = self.tokenizer.encode(
+                    "\n".join(f"[{m['role'].upper()}]\n{m['content']}" for m in teacher_messages)
+                    + "\n\n[ASSISTANT]\n",
+                    add_special_tokens=True,
+                )
+
+            # Truncate prompt from left to fit max_prompt_len
+            teacher_prompt_ids = teacher_prompt_ids[-max_prompt_len:]
+            resp_ids = rollout_responses[i].tolist()
+            full_ids = teacher_prompt_ids + resp_ids
+            teacher_input_ids_list.append(full_ids)
+            teacher_attention_mask_list.append([1] * len(full_ids))
+
+        # Left-pad all sequences to the same total length
+        max_total_len = max(len(ids) for ids in teacher_input_ids_list)
+        padded_input_ids = []
+        padded_attention_mask = []
+        for ids, mask in zip(teacher_input_ids_list, teacher_attention_mask_list):
+            pad_len = max_total_len - len(ids)
+            padded_input_ids.append([pad_id] * pad_len + ids)
+            padded_attention_mask.append([0] * pad_len + mask)
+
+        teacher_input_ids = torch.tensor(padded_input_ids, dtype=torch.long)
+        teacher_attention_mask = torch.tensor(padded_attention_mask, dtype=torch.long)
+        position_ids = compute_position_id_with_mask(teacher_attention_mask)
+
+        return DataProto.from_dict(
+            tensors={
+                "input_ids": teacher_input_ids,
+                "attention_mask": teacher_attention_mask,
+                "position_ids": position_ids,
+                "responses": rollout_responses.cpu(),
+            }
+        )
+
+    def _compute_opsd_stats(
+        self,
+        batch: DataProto,
+        timing_raw: dict,
+        timer_name: str = "opsd_teacher_student_jsd",
+        timer_color: str = "blue",
+    ) -> tuple[torch.Tensor, torch.Tensor, float, float]:
+        """Compute shared OPSD stats used by both RL+OPSD and pure-OPSD paths.
+
+        Returns:
+            jsd_per_token_cpu: [B, R]
+            student_old_log_probs_cpu: [B, R]
+            beta: float
+            temperature: float
+        """
+        rollout_responses = batch.batch["responses"].cpu()
+        beta = float(self.config.algorithm.get("opsd_beta", 0.5))
+        temperature = float(self.generation_config.get("temperature", 1.0))
+
+        with marked_timer(timer_name, timing_raw, color=timer_color):
+            student_batch = DataProto.from_dict(
+                tensors={
+                    "input_ids": batch.batch["input_ids"].cpu(),
+                    "attention_mask": batch.batch["attention_mask"].cpu(),
+                    "position_ids": batch.batch["position_ids"].cpu(),
+                    "responses": rollout_responses,
+                },
+                meta_info={"temperature": temperature, "opsd_beta": beta},
+            )
+            teacher_batch = self._build_teacher_inputs(batch, rollout_responses)
+            teacher_batch.meta_info["temperature"] = temperature
+            jsd_out = self.actor_rollout_wg.compute_opsd_jsd_per_token(
+                student_batch, teacher_batch
+            )
+
+        jsd_per_token_cpu = jsd_out.batch["opsd_jsd_per_token"]  # [B, R] cpu
+        student_old_log_probs_cpu = jsd_out.batch["opsd_student_log_probs"]  # [B, R] cpu
+        return jsd_per_token_cpu, student_old_log_probs_cpu, beta, temperature
 
     def _prepare_generation_batch(self, batch: DataProto) -> DataProto:
         """

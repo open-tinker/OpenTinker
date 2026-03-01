@@ -1,0 +1,87 @@
+# OPSD — On-Policy Self-Distillation Configuration (Math task)
+#
+# Unified endpoint:
+#   always routes to /api/v1/train_step
+#
+# Behavior is controlled by:
+#   disable_rl_reward: true  -> pure JSD (no RL reward signal)
+#   disable_rl_reward: false -> RL + JSD
+#
+# Teacher = Student (same weights). Teacher prompt uses extra_info["answer"]
+# (full step-by-step solution) as privileged information.
+
+# Project settings
+project_name: opentinker
+experiment_name: math_opsd
+
+# Logging
+logger_backends: ["console", "wandb"]
+wandb_key: null
+
+# Model (used for both student and teacher — same checkpoint)
+tokenizer_path: null
+
+# Data paths
+data_path: null
+val_data_path: null
+
+# Training parameters
+batch_size: 64
+num_workers: 0
+num_epochs: 10
+num_steps: null
+save_freq: 100
+test_freq: 5
+
+# Validation
+val_batch_size: 200
+val_n: 1
+val_seed: 42   # fixed random subset seed for validation; set null for new random subset each run
+
+# Generation
+temperature: 0.7
+top_p: 1.0
+max_new_tokens: 8194
+max_prompt_tokens: 4096
+
+# Algorithm
+algorithm: "agent_loop"
+adv_estimator: "grpo"
+
+# Single switch for pure-JSD vs RL+JSD
+disable_rl_reward: false
+
+# [Deprecated compatibility] legacy mode string, no longer required
+# opsd_mode: "pure_jsd"
+
+# OPSD hyperparameters
+rollout_n: 1              # rollouts per prompt (1 works well for dense JSD supervision)
+opsd_beta: 0.5            # JSD mixture weight β (0.5 = symmetric)
+
+# Weight of JSD penalty in advantage shaping.
+# For pure JSD (disable_rl_reward=true), keep 1.0.
+opsd_jsd_coef: 1.0
+
+# Interaction configuration (required when disable_rl_reward=false; optional otherwise)
+interaction:
+  name: math
+  class_path: opentinker.environment.gym_environment_interaction.GymEnvironmentInteraction
+  config:
+    env_host: 0.0.0.0
+    env_port: 8088
+    env_endpoint: http://${interaction.config.env_host}:${interaction.config.env_port}
+    max_steps: 1
+
+multi_turn:
+  max_user_turns: 0
+  max_assistant_turns: 1
+  max_tokens_per_turn: 8192
+  weave_project: null
+  experiment_name: "math_opsd_interaction"
+
+# Scheduler
+scheduler_url: "http://0.0.0.0:8780"
+scheduler_api_key: otk_98b8db24ccd64c92e1fdd9a232e209fa
+
+# GPU settings
+num_gpus: 4

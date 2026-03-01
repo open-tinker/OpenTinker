@@ -28,6 +28,7 @@ from typing import List, Optional, Tuple
 
 import numpy as np
 import torch
+import torch.nn.functional as F
 
 
 def compute_turn_boundaries(
@@ -336,3 +337,66 @@ def incorporate_kl_penalty_in_advantage(
     data.batch["returns"] = data.batch["advantages"]
 
     return data
+
+
+def compute_opsd_jsd_loss(
+    student_log_probs: torch.Tensor,
+    teacher_log_probs: torch.Tensor,
+    response_mask: torch.Tensor,
+    beta: float = 0.5,
+) -> tuple[torch.Tensor, dict]:
+    """Compute OPSD full-vocabulary JSD loss between teacher and student.
+
+    Both teacher and student observe the **same** rollout tokens ŷ, but with
+    different prompts (student: question only; teacher: question + reference answer).
+    The loss is the token-averaged Jensen-Shannon divergence:
+
+        JSD_β(pT ‖ pS) = β·KL(pT‖m) + (1-β)·KL(pS‖m),  m = β·pT + (1-β)·pS
+
+    Computed in log-space to avoid float-precision issues with softmax.
+
+    Gradient flows only through `student_log_probs` (teacher is detached by the caller).
+
+    Args:
+        student_log_probs: shape [batch, response_len, vocab_size] — log-softmax output
+            for the student (gradients required).
+        teacher_log_probs: shape [batch, response_len, vocab_size] — log-softmax output
+            for the teacher (no gradients required; caller should detach).
+        response_mask: shape [batch, response_len] — 1 for LLM tokens, 0 for padding.
+        beta: JSD mixture weight (default 0.5 → symmetric JSD).
+
+    Returns:
+        jsd_loss: scalar tensor (mean JSD over unmasked tokens).
+        metrics: dict with keys 'opsd/jsd_per_token', 'opsd/jsd_beta'.
+    """
+    # log mixture: log m = log(β·pT + (1-β)·pS)
+    # Use log-sum-exp trick:  log(β·pT + (1-β)·pS)
+    #   = log( exp(log β + log pT) + exp(log(1-β) + log pS) )
+    log_beta = torch.tensor(beta, device=student_log_probs.device).log()
+    log_one_minus_beta = torch.tensor(1.0 - beta, device=student_log_probs.device).log()
+
+    # [batch, response_len, vocab] — log mixture distribution
+    log_m = torch.logaddexp(
+        log_beta + teacher_log_probs,
+        log_one_minus_beta + student_log_probs,
+    )
+
+    # KL(pT‖m) = Σ pT * (log pT - log m)   [sum over vocab]
+    kl_teacher = (teacher_log_probs.exp() * (teacher_log_probs - log_m)).sum(-1)  # [batch, response_len]
+
+    # KL(pS‖m) = Σ pS * (log pS - log m)
+    kl_student = (student_log_probs.exp() * (student_log_probs - log_m)).sum(-1)  # [batch, response_len]
+
+    # per-token JSD
+    jsd_per_token = beta * kl_teacher + (1.0 - beta) * kl_student  # [batch, response_len]
+
+    # mask and average
+    masked_jsd = jsd_per_token * response_mask
+    n_tokens = response_mask.sum().clamp(min=1)
+    jsd_loss = masked_jsd.sum() / n_tokens
+
+    metrics = {
+        "opsd/jsd_per_token": jsd_loss.detach().item(),
+        "opsd/jsd_beta": beta,
+    }
+    return jsd_loss, metrics
