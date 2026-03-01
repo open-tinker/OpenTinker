@@ -132,6 +132,36 @@ class ALFWorldGame(AbstractGame):
         self._done = False
         self._initialized = False  # Track if engine is ready
 
+    def _resolve_alfworld_data_root(self) -> str:
+        """Resolve ALFWorld data root with robust fallbacks.
+
+        Priority:
+        1) ALFWORLD_DATA environment variable (if valid)
+        2) Repository-local ./alfworld_data (if valid)
+        3) ~/.cache/alfworld (if valid)
+        4) Best-effort fallback to ALFWORLD_DATA or ~/.cache/alfworld
+        """
+        env_root = os.path.expandvars(os.environ.get("ALFWORLD_DATA", "")).strip()
+        repo_root = os.path.abspath(
+            os.path.join(os.path.dirname(__file__), "..", "..", "..")
+        )
+        repo_data_root = os.path.join(repo_root, "alfworld_data")
+        cache_root = os.path.expandvars("$HOME/.cache/alfworld")
+
+        candidates = []
+        if env_root:
+            candidates.append(env_root)
+        candidates.extend([repo_data_root, cache_root])
+
+        for candidate in candidates:
+            has_json = os.path.isdir(os.path.join(candidate, "json_2.1.1"))
+            has_logic = os.path.isdir(os.path.join(candidate, "logic"))
+            if has_json and has_logic:
+                return candidate
+
+        # No valid root found; keep previous behavior but with explicit fallback.
+        return env_root or cache_root
+
     def _load_alfworld_config(self):
         """Load ALFWorld configuration."""
 
@@ -140,9 +170,8 @@ class ALFWorldGame(AbstractGame):
                 self._config = yaml.safe_load(f)
         else:
             # ALFWorld data directory (need to run 'alfworld-download' first)
-            alfworld_data = os.path.expandvars(
-                os.environ.get("ALFWORLD_DATA", "$HOME/.cache/alfworld")
-            )
+            alfworld_data = self._resolve_alfworld_data_root()
+            self._alfworld_data_root = alfworld_data
 
             # Use default config with all required fields
             self._config = {
@@ -192,14 +221,19 @@ class ALFWorldGame(AbstractGame):
             List of trial directory paths (containing game.tw-pddl files)
         """
         # Create a unique cache key based on split and task types
-        cache_key = f"{self.split}:{','.join(sorted(self.task_types))}:{self.num_games}"
+        data_root = getattr(self, "_alfworld_data_root", None)
+        if not data_root:
+            data_root = self._resolve_alfworld_data_root()
+            self._alfworld_data_root = data_root
+        cache_key = (
+            f"{data_root}:{self.split}:{','.join(sorted(self.task_types))}:"
+            f"{self.num_games}"
+        )
 
         with ALFWorldGame._cache_lock:
             if cache_key not in ALFWorldGame._cached_game_paths:
                 # First instance: scan the disk
-                alfworld_data = os.path.expandvars(
-                    os.environ.get("ALFWORLD_DATA", "$HOME/.cache/alfworld")
-                )
+                alfworld_data = data_root
 
                 # Determine base path based on split
                 if self.split == "train":
@@ -421,6 +455,17 @@ class ALFWorldGame(AbstractGame):
         # Thread safety: parallelism comes from sharding (multiple server processes)
         game_state, reward, done, info = self._tw_env.step(parsed_action)
 
+        won_flag = self._extract_bool_flag(
+            preferred_source=info,
+            fallback_source=game_state,
+            key="won",
+        )
+        lost_flag = self._extract_bool_flag(
+            preferred_source=info,
+            fallback_source=game_state,
+            key="lost",
+        )
+
         # Extract observation from game_state
         if hasattr(game_state, "feedback"):
             obs = game_state.feedback
@@ -446,6 +491,8 @@ class ALFWorldGame(AbstractGame):
             done = True
             reward = self.REWARD_FAILURE
             obs = f"TIMEOUT: Maximum steps ({self.max_steps}) reached.\n\n{obs}"
+            won_flag = False
+            lost_flag = True
 
         # Adjust rewards
         if done and reward > 0:
@@ -461,6 +508,10 @@ class ALFWorldGame(AbstractGame):
             if "Nothing happens" in obs or "invalid" in obs.lower():
                 final_reward = self.REWARD_INVALID_ACTION
 
+        if won_flag is None and done:
+            won_flag = bool(reward > 0)
+        success_flag = bool(won_flag) if won_flag is not None else False
+
         self._done = done
 
         return StepResult(
@@ -473,8 +524,45 @@ class ALFWorldGame(AbstractGame):
                 "raw_reward": float(reward),
                 "action_taken": parsed_action,
                 "task": self._task_desc,
+                "won": won_flag,
+                "success": success_flag,
+                "lost": lost_flag,
             },
         )
+
+    @staticmethod
+    def _coerce_optional_bool(value: Any) -> Optional[bool]:
+        if value is None:
+            return None
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, (int, float)):
+            return bool(value)
+        if isinstance(value, str):
+            lowered = value.strip().lower()
+            if lowered in {"true", "1", "yes", "y"}:
+                return True
+            if lowered in {"false", "0", "no", "n"}:
+                return False
+        if isinstance(value, (list, tuple)):
+            if not value:
+                return None
+            return ALFWorldGame._coerce_optional_bool(value[0])
+        return None
+
+    @classmethod
+    def _extract_bool_flag(
+        cls,
+        preferred_source: Any,
+        fallback_source: Any,
+        key: str,
+    ) -> Optional[bool]:
+        value = None
+        if isinstance(preferred_source, dict):
+            value = preferred_source.get(key)
+        if value is None and hasattr(fallback_source, key):
+            value = getattr(fallback_source, key)
+        return cls._coerce_optional_bool(value)
 
     def _parse_action(self, raw_action: str) -> str:
         """Parse action from LLM output.
