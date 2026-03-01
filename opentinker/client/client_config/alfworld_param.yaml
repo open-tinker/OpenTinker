@@ -19,13 +19,13 @@ wandb_key: 2ed6f8544ac3e30d5c08879166cc10d9c6232448
 tokenizer_path: null
 
 # Training parameters
-batch_size: 4
+batch_size: 8
 num_workers: 4
 # Training duration - set ONE of these (num_steps takes precedence if both set)
 num_epochs: null # Number of epochs (null = use num_steps)
 num_steps: 1000 # Total training steps (null = use num_epochs)
-save_freq: 20000
-test_freq: 10 # Validation frequency (every N steps)
+save_freq: 200
+test_freq: 50 # Validation frequency (every N steps)
 
 # Validation parameters
 val_batch_size: 50 # Total validation samples (null = 50)
@@ -34,8 +34,8 @@ val_batch_size: 50 # Total validation samples (null = 50)
 # Generation parameters
 temperature: 1 # Lower temperature for more focused responses
 top_p: 1
-max_new_tokens: 8192 # TOTAL response budget for entire multi-turn trajectory (NOT per-turn!)
-max_prompt_tokens: 4096
+max_new_tokens: 4096 # TOTAL response budget for entire multi-turn trajectory (NOT per-turn!)
+max_prompt_tokens: 2048
 
 # Algorithm (must be agent_loop for multi-turn)
 algorithm: "agent_loop"
@@ -80,4 +80,4 @@ scheduler_url: "http://0.0.0.0:8780"
 scheduler_api_key: otk_98b8db24ccd64c92e1fdd9a232e209fa
 
 # GPU settings
-num_gpus: 4
+num_gpus: 8
