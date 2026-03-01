@@ -85,6 +85,10 @@ from opentinker.backend_patch.verl.trainer.ppo.reward import (
     compute_reward_async,
     load_reward_manager,
 )
+from opentinker.server.opsd_config import (
+    compute_sampled_kl_penalty,
+    validate_opsd_modes,
+)
 
 
 # Configure logging
@@ -622,6 +626,11 @@ class PPOTrainingServerBackend:
             ray_worker_group_cls: Ray worker group class
         """
         self.config = config
+        teacher_source, loss_mode = validate_opsd_modes(self.config.algorithm)
+        logger.info(
+            "Validated OPSD modes at backend init: "
+            f"opsd_teacher_source={teacher_source}, opsd_loss_mode={loss_mode}"
+        )
         self.tokenizer = tokenizer
         self.role_worker_mapping = role_worker_mapping
         self.resource_pool_manager = resource_pool_manager
@@ -1199,13 +1208,14 @@ class PPOTrainingServerBackend:
                     metrics["distill/kl_per_token"] = kl.mean().item()
                     metrics["distill/kl_coef"] = kl_coef
 
-                # OPSD (optional in RL path): add per-token JSD penalty.
-                # A_final = A_base - opsd_jsd_coef * JSD_β(pT ‖ pS)
+                # OPSD (optional in RL path): add per-token distillation penalty.
+                #   full_jsd  : A_final = A_base - coef * JSD_β(pT ‖ pS)
+                #   sampled_kl: A_final = A_base - coef * (log pS - log pT)
                 if self.config.algorithm.get("use_opsd_jsd_in_advantage", False):
                     jsd_coef = float(self.config.algorithm.get("opsd_jsd_coef", 0.1))
                     rm = batch.batch["response_mask"].float()
 
-                    jsd_per_token, _student_old_log_probs, beta, temperature = self._compute_opsd_stats(
+                    opsd_stats = self._compute_opsd_stats(
                         batch=batch,
                         timing_raw=timing_raw,
                         timer_name="opsd_teacher_student_jsd",
@@ -1213,16 +1223,35 @@ class PPOTrainingServerBackend:
                     )
 
                     device = batch.batch["advantages"].device
-                    jsd_per_token = jsd_per_token.to(device)
                     rm_device = rm.to(device)
-                    masked_jsd = jsd_per_token * rm_device
-                    n_tokens = rm_device.sum().clamp(min=1)
-                    metrics["opsd/jsd_per_token"] = (masked_jsd.sum() / n_tokens).item()
-                    metrics["opsd/jsd_beta"] = beta
-                    batch.batch["advantages"] = (
-                        batch.batch["advantages"] - jsd_coef * masked_jsd
-                    )
-                    metrics["opsd/jsd_coef"] = jsd_coef
+                    if opsd_stats["loss_mode"] == "full_jsd":
+                        jsd_per_token = opsd_stats["jsd_per_token_cpu"].to(device)
+                        masked_jsd = jsd_per_token * rm_device
+                        n_tokens = rm_device.sum().clamp(min=1)
+                        metrics["opsd/jsd_per_token"] = (
+                            masked_jsd.sum() / n_tokens
+                        ).item()
+                        metrics["opsd/jsd_beta"] = opsd_stats["beta"]
+                        batch.batch["advantages"] = (
+                            batch.batch["advantages"] - jsd_coef * masked_jsd
+                        )
+                        metrics["opsd/jsd_coef"] = jsd_coef
+                    else:
+                        student_log_probs = opsd_stats["student_log_probs_cpu"].to(device)
+                        teacher_log_probs = opsd_stats["teacher_log_probs_cpu"].to(device)
+                        sampled_kl = compute_sampled_kl_penalty(
+                            student_log_probs=student_log_probs,
+                            teacher_log_probs=teacher_log_probs,
+                            response_mask=rm_device,
+                        )
+                        n_tokens = rm_device.sum().clamp(min=1)
+                        metrics["opsd/sampled_kl_per_token"] = (
+                            sampled_kl.sum() / n_tokens
+                        ).item()
+                        batch.batch["advantages"] = (
+                            batch.batch["advantages"] - jsd_coef * sampled_kl
+                        )
+                        metrics["opsd/kl_coef"] = jsd_coef
 
             # 10. Update critic
             if self.use_critic:
@@ -1467,18 +1496,23 @@ class PPOTrainingServerBackend:
         timing_raw: dict,
         timer_name: str = "opsd_teacher_student_jsd",
         timer_color: str = "blue",
-    ) -> tuple[torch.Tensor, torch.Tensor, float, float]:
+    ) -> dict:
         """Compute shared OPSD stats used by both RL+OPSD and pure-OPSD paths.
 
         Returns:
-            jsd_per_token_cpu: [B, R]
-            student_old_log_probs_cpu: [B, R]
-            beta: float
-            temperature: float
+            Dict containing:
+                teacher_source: str
+                loss_mode: str
+                beta: float
+                temperature: float
+                student_log_probs_cpu: [B, R]
+                jsd_per_token_cpu: [B, R] (full_jsd only)
+                teacher_log_probs_cpu: [B, R] (sampled_kl only)
         """
         rollout_responses = batch.batch["responses"].cpu()
         beta = float(self.config.algorithm.get("opsd_beta", 0.5))
         temperature = float(self.generation_config.get("temperature", 1.0))
+        teacher_source, loss_mode = validate_opsd_modes(self.config.algorithm)
 
         with marked_timer(timer_name, timing_raw, color=timer_color):
             student_batch = DataProto.from_dict(
@@ -1488,17 +1522,43 @@ class PPOTrainingServerBackend:
                     "position_ids": batch.batch["position_ids"].cpu(),
                     "responses": rollout_responses,
                 },
-                meta_info={"temperature": temperature, "opsd_beta": beta},
+                meta_info={
+                    "temperature": temperature,
+                    "opsd_beta": beta,
+                    "opsd_teacher_source": teacher_source,
+                    "opsd_loss_mode": loss_mode,
+                },
             )
             teacher_batch = self._build_teacher_inputs(batch, rollout_responses)
             teacher_batch.meta_info["temperature"] = temperature
+            teacher_batch.meta_info["opsd_teacher_source"] = teacher_source
+            teacher_batch.meta_info["opsd_loss_mode"] = loss_mode
             jsd_out = self.actor_rollout_wg.compute_opsd_jsd_per_token(
                 student_batch, teacher_batch
             )
 
-        jsd_per_token_cpu = jsd_out.batch["opsd_jsd_per_token"]  # [B, R] cpu
-        student_old_log_probs_cpu = jsd_out.batch["opsd_student_log_probs"]  # [B, R] cpu
-        return jsd_per_token_cpu, student_old_log_probs_cpu, beta, temperature
+        out = {
+            "teacher_source": teacher_source,
+            "loss_mode": loss_mode,
+            "beta": beta,
+            "temperature": temperature,
+            "student_log_probs_cpu": jsd_out.batch["opsd_student_log_probs"],  # [B, R] cpu
+            "jsd_per_token_cpu": None,
+            "teacher_log_probs_cpu": None,
+        }
+        if "opsd_jsd_per_token" in jsd_out.batch.keys():
+            out["jsd_per_token_cpu"] = jsd_out.batch["opsd_jsd_per_token"]
+        if "opsd_teacher_log_probs" in jsd_out.batch.keys():
+            out["teacher_log_probs_cpu"] = jsd_out.batch["opsd_teacher_log_probs"]
+        if loss_mode == "full_jsd" and out["jsd_per_token_cpu"] is None:
+            raise RuntimeError(
+                "OPSD worker output missing 'opsd_jsd_per_token' for full_jsd mode."
+            )
+        if loss_mode == "sampled_kl" and out["teacher_log_probs_cpu"] is None:
+            raise RuntimeError(
+                "OPSD worker output missing 'opsd_teacher_log_probs' for sampled_kl mode."
+            )
+        return out
 
     def _prepare_generation_batch(self, batch: DataProto) -> DataProto:
         """
@@ -2020,6 +2080,11 @@ async def override_config(request: ConfigOverrideRequest):
         logger.info(
             f"[DEBUG] AFTER merge - tokenizer path: {_server_cfg.actor_rollout_ref.model.path}"
         )
+        teacher_source, loss_mode = validate_opsd_modes(_server_cfg.algorithm)
+        logger.info(
+            "Validated OPSD modes: "
+            f"opsd_teacher_source={teacher_source}, opsd_loss_mode={loss_mode}"
+        )
 
         # CRITICAL: Handle cross-node interaction_config distribution
         # If client sent interaction_config_content, recreate the temp file locally
@@ -2060,6 +2125,8 @@ async def override_config(request: ConfigOverrideRequest):
             "message": "Configuration merged and server initialization triggered",
         }
 
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Failed to merge config: {e}")
         import traceback

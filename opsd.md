@@ -95,6 +95,19 @@ An 在反向传播时视为常数（stop gradient）。
 - 稳定训练过程
 - 隐式起到正则化效果，防止模型过度偏离初始分布
 
+在当前工程实现中，这一行为由配置项控制：
+
+```yaml
+algorithm:
+  use_opsd_jsd_in_advantage: true
+  opsd_teacher_source: initial_frozen   # online | initial_frozen
+  opsd_loss_mode: full_jsd              # full_jsd | sampled_kl
+```
+
+- `opsd_teacher_source=online`：teacher 使用当前在线 actor（默认）。
+- `opsd_teacher_source=initial_frozen`：teacher 使用初始化时加载并冻结的参考权重。
+- `opsd_loss_mode=sampled_kl`：使用 sampled-token KL，近似 full-vocab 蒸馏信号。
+
 ### 4.2 采样效率
 
 | 方法 | 每个问题采样数 | 生成长度 | token 效率 |

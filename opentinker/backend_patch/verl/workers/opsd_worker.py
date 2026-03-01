@@ -37,6 +37,7 @@ from verl.single_controller.base.decorator import Dispatch, register
 from verl.workers.fsdp_workers import ActorRolloutRefWorker
 from verl.utils.fsdp_utils import fsdp_version, load_fsdp_model_to_gpu, offload_fsdp_model_to_cpu
 from verl.utils.profiler import log_gpu_memory_usage
+from opentinker.server.opsd_config import validate_opsd_modes
 
 logger = logging.getLogger(__name__)
 
@@ -118,18 +119,21 @@ def _compute_vocab_log_probs(actor, data: DataProto) -> torch.Tensor:
     return result
 
 
-def _compute_jsd_per_token_and_sampled_log_probs(
-    actor,
+def _compute_opsd_distill_stats(
+    student_actor,
+    teacher_actor,
     student_data: DataProto,
     teacher_data: DataProto,
     beta: float,
+    loss_mode: str,
     vocab_chunk_size: int = 4096,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """Compute OPSD per-token JSD and student sampled-token log-probs.
+) -> tuple[torch.Tensor | None, torch.Tensor, torch.Tensor]:
+    """Compute OPSD distillation stats for full-JSD or sampled-KL modes.
 
     This function avoids materializing/storing full-vocab log-probs [B, R, V] on CPU
     and avoids sending those tensors through Ray. It computes exact JSD in streaming
-    chunks over the vocab dimension and returns only [B, R] tensors.
+    chunks over the vocab dimension (for full_jsd mode), and always returns sampled
+    token log-probs for student/teacher.
     """
     from verl.utils.device import get_device_id, get_device_name
 
@@ -137,8 +141,13 @@ def _compute_jsd_per_token_and_sampled_log_probs(
         raise ValueError(f"beta must be in (0, 1), got {beta}")
     if vocab_chunk_size <= 0:
         raise ValueError(f"vocab_chunk_size must be > 0, got {vocab_chunk_size}")
+    if loss_mode not in {"full_jsd", "sampled_kl"}:
+        raise ValueError(
+            f"loss_mode must be one of ['full_jsd', 'sampled_kl'], got {loss_mode!r}"
+        )
 
-    actor.actor_module.eval()
+    student_actor.actor_module.eval()
+    teacher_actor.actor_module.eval()
 
     student_select_keys = ["responses", "input_ids", "attention_mask", "position_ids"]
     teacher_select_keys = ["input_ids", "attention_mask", "position_ids"]
@@ -168,8 +177,9 @@ def _compute_jsd_per_token_and_sampled_log_probs(
     log_one_minus_beta = math.log(1.0 - beta)
     device_name = get_device_name()
 
-    all_jsd_per_token = []
+    all_jsd_per_token = [] if loss_mode == "full_jsd" else None
     all_student_sampled_log_probs = []
+    all_teacher_sampled_log_probs = []
 
     for student_mb, teacher_mb in zip(student_mbs, teacher_mbs, strict=True):
         student_mb = student_mb.to(get_device_id())
@@ -183,13 +193,13 @@ def _compute_jsd_per_token_and_sampled_log_probs(
 
         with torch.no_grad():
             with torch.autocast(device_type=device_name, dtype=torch.bfloat16):
-                student_out = actor.actor_module(
+                student_out = student_actor.actor_module(
                     input_ids=student_inputs["input_ids"],
                     attention_mask=student_inputs["attention_mask"],
                     position_ids=student_inputs["position_ids"],
                     use_cache=False,
                 )
-                teacher_out = actor.actor_module(
+                teacher_out = teacher_actor.actor_module(
                     input_ids=teacher_inputs["input_ids"],
                     attention_mask=teacher_inputs["attention_mask"],
                     position_ids=teacher_inputs["position_ids"],
@@ -213,33 +223,62 @@ def _compute_jsd_per_token_and_sampled_log_probs(
             sampled_log_probs = (
                 student_flat.gather(dim=-1, index=sampled_token_ids).float().squeeze(-1) - student_lse.squeeze(-1)
             )  # [mb * response_len]
+            teacher_sampled_log_probs = (
+                teacher_flat.gather(dim=-1, index=sampled_token_ids).float().squeeze(-1)
+                - teacher_lse.squeeze(-1)
+            )  # [mb * response_len]
 
-            # Exact JSD with chunked vocab accumulation:
-            # JSD_beta = beta * KL(p_t || m) + (1-beta) * KL(p_s || m)
-            # m = beta * p_t + (1-beta) * p_s
-            kl_teacher = torch.zeros((student_flat.shape[0],), device=student_flat.device, dtype=torch.float32)
-            kl_student = torch.zeros_like(kl_teacher)
-            for start in range(0, vocab_size, vocab_chunk_size):
-                end = min(start + vocab_chunk_size, vocab_size)
-
-                student_logp_chunk = student_flat[:, start:end].float() - student_lse
-                teacher_logp_chunk = teacher_flat[:, start:end].float() - teacher_lse
-
-                log_m_chunk = torch.logaddexp(
-                    teacher_logp_chunk + log_beta,
-                    student_logp_chunk + log_one_minus_beta,
+            if loss_mode == "full_jsd":
+                # Exact JSD with chunked vocab accumulation:
+                # JSD_beta = beta * KL(p_t || m) + (1-beta) * KL(p_s || m)
+                # m = beta * p_t + (1-beta) * p_s
+                kl_teacher = torch.zeros(
+                    (student_flat.shape[0],),
+                    device=student_flat.device,
+                    dtype=torch.float32,
                 )
+                kl_student = torch.zeros_like(kl_teacher)
+                for start in range(0, vocab_size, vocab_chunk_size):
+                    end = min(start + vocab_chunk_size, vocab_size)
 
-                kl_teacher += (teacher_logp_chunk.exp() * (teacher_logp_chunk - log_m_chunk)).sum(dim=-1)
-                kl_student += (student_logp_chunk.exp() * (student_logp_chunk - log_m_chunk)).sum(dim=-1)
+                    student_logp_chunk = student_flat[:, start:end].float() - student_lse
+                    teacher_logp_chunk = teacher_flat[:, start:end].float() - teacher_lse
 
-            jsd_per_token = (beta * kl_teacher + (1.0 - beta) * kl_student).view(mb, resp_len)  # [mb, response_len]
+                    log_m_chunk = torch.logaddexp(
+                        teacher_logp_chunk + log_beta,
+                        student_logp_chunk + log_one_minus_beta,
+                    )
+
+                    kl_teacher += (
+                        teacher_logp_chunk.exp() * (teacher_logp_chunk - log_m_chunk)
+                    ).sum(dim=-1)
+                    kl_student += (
+                        student_logp_chunk.exp() * (student_logp_chunk - log_m_chunk)
+                    ).sum(dim=-1)
+
+                jsd_per_token = (
+                    beta * kl_teacher + (1.0 - beta) * kl_student
+                ).view(mb, resp_len)  # [mb, response_len]
             sampled_log_probs = sampled_log_probs.view(mb, resp_len)  # [mb, response_len]
+            teacher_sampled_log_probs = teacher_sampled_log_probs.view(
+                mb, resp_len
+            )  # [mb, response_len]
 
-        all_jsd_per_token.append(jsd_per_token.cpu())
+        if loss_mode == "full_jsd":
+            all_jsd_per_token.append(jsd_per_token.cpu())
         all_student_sampled_log_probs.append(sampled_log_probs.cpu())
+        all_teacher_sampled_log_probs.append(teacher_sampled_log_probs.cpu())
 
-    return torch.cat(all_jsd_per_token, dim=0), torch.cat(all_student_sampled_log_probs, dim=0)
+    jsd_out = (
+        torch.cat(all_jsd_per_token, dim=0)
+        if loss_mode == "full_jsd"
+        else None
+    )
+    return (
+        jsd_out,
+        torch.cat(all_student_sampled_log_probs, dim=0),
+        torch.cat(all_teacher_sampled_log_probs, dim=0),
+    )
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -293,7 +332,7 @@ def _compute_opsd_vocab_log_probs(self, data: DataProto) -> DataProto:
 
 
 def _compute_opsd_jsd_per_token(self, student_data: DataProto, teacher_data: DataProto) -> DataProto:
-    """Compute per-token OPSD JSD and student sampled-token log-probs.
+    """Compute OPSD distillation stats for full-JSD or sampled-KL modes.
 
     Args:
         student_data: DataProto with student prompt tensors + responses.
@@ -302,8 +341,12 @@ def _compute_opsd_jsd_per_token(self, student_data: DataProto, teacher_data: Dat
 
     Returns:
         DataProto with:
-            - opsd_jsd_per_token: [batch, response_len] float32 on CPU
-            - opsd_student_log_probs: [batch, response_len] float32 on CPU
+            - full_jsd mode:
+                * opsd_jsd_per_token: [batch, response_len] float32 on CPU
+                * opsd_student_log_probs: [batch, response_len] float32 on CPU
+            - sampled_kl mode:
+                * opsd_student_log_probs: [batch, response_len] float32 on CPU
+                * opsd_teacher_log_probs: [batch, response_len] float32 on CPU
     """
     assert self._is_actor, "compute_opsd_jsd_per_token requires actor role"
     if self._is_offload_param:
@@ -326,26 +369,51 @@ def _compute_opsd_jsd_per_token(self, student_data: DataProto, teacher_data: Dat
     if "temperature" not in teacher_data.meta_info:
         teacher_data.meta_info["temperature"] = student_data.meta_info["temperature"]
     beta = float(student_data.meta_info.get("opsd_beta", 0.5))
+    teacher_source, loss_mode = validate_opsd_modes(student_data.meta_info)
+    if teacher_source == "initial_frozen":
+        if not self._is_ref or not hasattr(self, "ref_policy"):
+            raise RuntimeError(
+                "opsd_teacher_source='initial_frozen' requires actor role "
+                "'actor_rollout_ref' with initialized ref_policy."
+            )
+        teacher_actor = self.ref_policy
+    else:
+        teacher_actor = self.actor
 
     with self.ulysses_sharding_manager:
-        jsd_per_token, student_sampled_log_probs = _compute_jsd_per_token_and_sampled_log_probs(
-            actor=self.actor,
+        jsd_per_token, student_sampled_log_probs, teacher_sampled_log_probs = _compute_opsd_distill_stats(
+            student_actor=self.actor,
+            teacher_actor=teacher_actor,
             student_data=student_data,
             teacher_data=teacher_data,
             beta=beta,
+            loss_mode=loss_mode,
         )
+        tensors = {
+            "opsd_student_log_probs": student_sampled_log_probs,
+        }
+        if loss_mode == "full_jsd":
+            tensors["opsd_jsd_per_token"] = jsd_per_token
+        else:
+            tensors["opsd_teacher_log_probs"] = teacher_sampled_log_probs
         output = DataProto.from_dict(
-            tensors={
-                "opsd_jsd_per_token": jsd_per_token,
-                "opsd_student_log_probs": student_sampled_log_probs,
+            tensors=tensors,
+            meta_info={
+                "opsd_beta": beta,
+                "opsd_teacher_source": teacher_source,
+                "opsd_loss_mode": loss_mode,
             },
-            meta_info={"opsd_beta": beta},
         )
 
     output = output.to("cpu")
 
     if self.world_size > 1 and fsdp_version(self.actor.actor_module) == 1:
         self.actor.actor_module._handle.reshard(True)
+    if teacher_source == "initial_frozen" and self.world_size > 1:
+        if fsdp_version(self.ref_policy.actor_module) == 1:
+            self.ref_policy.actor_module._handle.reshard(True)
+        elif fsdp_version(self.ref_policy.actor_module) == 2:
+            self.ref_policy.actor_module.reshard()
 
     if self._is_offload_param:
         offload_fsdp_model_to_cpu(self.actor_module_fsdp)

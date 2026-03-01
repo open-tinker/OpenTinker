@@ -81,6 +81,10 @@ class AlgoConfig(BaseConfig):
         rollout_is_veto_threshold (float or None): Per-token veto threshold for catastrophic outliers. None to disable.
         rollout_is (bool): Whether to apply IS weights to policy loss. True = apply weights,
             False = compute metrics only (useful for monitoring before enabling correction). Default: False.
+        opsd_teacher_source (str): OPSD teacher source. "online" uses current actor
+            weights; "initial_frozen" uses the initialization-time frozen reference.
+        opsd_loss_mode (str): OPSD distillation loss mode. "full_jsd" computes
+            full-vocab JSD; "sampled_kl" uses sampled-token KL.
     """
 
     gamma: float = 1.0
@@ -103,3 +107,7 @@ class AlgoConfig(BaseConfig):
     # Controls whether to apply IS weights to policy loss (only if rollout_is_threshold is set)
     # True = apply weights to loss, False = compute metrics only (no weight application)
     rollout_is: bool = False
+    # OPSD teacher source: "online" | "initial_frozen"
+    opsd_teacher_source: str = "online"
+    # OPSD distillation loss mode: "full_jsd" | "sampled_kl"
+    opsd_loss_mode: str = "full_jsd"

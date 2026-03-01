@@ -7,8 +7,10 @@
 #   disable_rl_reward: true  -> pure JSD (no RL reward signal)
 #   disable_rl_reward: false -> RL + JSD
 #
-# Teacher = Student (same weights). Teacher prompt uses extra_info["answer"]
-# (full step-by-step solution) as privileged information.
+# Teacher prompt uses extra_info["answer"] (full step-by-step solution)
+# as privileged information. Teacher source is configurable:
+#   - online (default): current actor weights
+#   - initial_frozen: initialization-time frozen reference weights
 
 # Project settings
 project_name: opentinker
@@ -18,7 +20,7 @@ experiment_name: math_opsd
 logger_backends: ["console", "wandb"]
 wandb_key: null
 
-# Model (used for both student and teacher — same checkpoint)
+# Model checkpoint (student actor path; also used to initialize teacher/ref)
 tokenizer_path: null
 
 # Data paths
@@ -49,7 +51,7 @@ algorithm: "agent_loop"
 adv_estimator: "grpo"
 
 # Single switch for pure-JSD vs RL+JSD
-disable_rl_reward: false
+disable_rl_reward: true
 
 # [Deprecated compatibility] legacy mode string, no longer required
 # opsd_mode: "pure_jsd"
@@ -57,6 +59,8 @@ disable_rl_reward: false
 # OPSD hyperparameters
 rollout_n: 1              # rollouts per prompt (1 works well for dense JSD supervision)
 opsd_beta: 0.5            # JSD mixture weight β (0.5 = symmetric)
+opsd_teacher_source: "initial_frozen"   # "online" | "initial_frozen"
+opsd_loss_mode: "sampled_kl"      # "full_jsd" | "sampled_kl"
 
 # Weight of JSD penalty in advantage shaping.
 # For pure JSD (disable_rl_reward=true), keep 1.0.

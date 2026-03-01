@@ -1,0 +1,4 @@
+{
+    "FSDP_version": 1,
+    "world_size": 4
+}

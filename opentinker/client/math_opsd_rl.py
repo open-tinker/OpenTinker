@@ -10,8 +10,10 @@ Behavior switch:
   disable_rl_reward=False
       RL + JSD training.
 
-In both modes teacher = student (same model weights, different prompt).
 Teacher prompt includes extra_info["answer"] as the reference solution.
+Teacher source is configurable:
+  - online (default): teacher uses current actor weights
+  - initial_frozen: teacher uses initialization-time frozen reference weights
 """
 
 import hydra
@@ -26,6 +28,7 @@ from opentinker.environment.game_stats_client import GameStatsClient
 from utils.utils import resolve_paths_in_config
 from utils.scheduler_client_lifecycle import get_lifecycle_manager
 from opentinker.environment.math.math_env import MathGameEnvironment
+from opentinker.server.opsd_config import validate_opsd_modes
 
 
 @hydra.main(config_path="client_config", config_name="math_opsd_param.yaml")
@@ -37,15 +40,21 @@ def main(args):
     # Backward compatibility: if not explicitly provided, derive from legacy opsd_mode.
     legacy_mode = str(args.get("opsd_mode", "pure_jsd"))
     disable_rl_reward = bool(args.get("disable_rl_reward", legacy_mode == "pure_jsd"))
+    opsd_teacher_source, opsd_loss_mode = validate_opsd_modes(args)
 
     print("=" * 60)
     print("OPSD — On-Policy Self-Distillation — Math")
     print(f"  disable_rl_reward: {disable_rl_reward}")
     print(f"  opsd_beta        : {args.get('opsd_beta', 0.5)}")
     print(f"  opsd_jsd_coef    : {args.get('opsd_jsd_coef', 1.0)}")
+    print(f"  teacher_source   : {opsd_teacher_source}")
+    print(f"  loss_mode        : {opsd_loss_mode}")
     print(f"  adv_estimator    : {args.adv_estimator}")
     print(f"  rollout_n        : {args.get('rollout_n', 1)}")
-    print("Teacher = Student model (same weights, different prompt)")
+    if opsd_teacher_source == "initial_frozen":
+        print("Teacher = initialization-time frozen reference model")
+    else:
+        print("Teacher = current student model (online, different prompt)")
     print("=" * 60)
 
     if disable_rl_reward:
@@ -106,6 +115,8 @@ def main(args):
         "opsd_beta": float(args.get("opsd_beta", 0.5)),
         "use_opsd_jsd_in_advantage": True,
         "opsd_jsd_coef": float(args.get("opsd_jsd_coef", 1.0)),
+        "opsd_teacher_source": opsd_teacher_source,
+        "opsd_loss_mode": opsd_loss_mode,
         "use_kl_in_advantage": False,
         "disable_rl_reward": disable_rl_reward,
     }

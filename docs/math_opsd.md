@@ -2,20 +2,22 @@
 
 ## Overview
 
-OPSD trains a **single model** as both teacher and student, using only **full-parameter RL** (no LoRA, no external teacher). The same model weights see two different prompts:
+OPSD trains a student from on-policy rollouts with a teacher prompt that includes privileged solution information.
+By default, teacher uses the **online** actor weights; you can optionally switch to an
+**initial frozen** teacher for stability.
 
 | Role    | Prompt                                         | Gradient |
 |---------|------------------------------------------------|----------|
 | Student | `Problem: <q>\nAnswer:`                        | ✅ yes   |
 | Teacher | `Problem: <q>\n\nHere is a reference solution:\n<y*>\nAfter understanding the reference solution, please try to solve this problem using your own approach below:` | ❌ detached |
 
-**Loss**: token-averaged symmetric JSD between the two distributions, computed over the **full vocabulary**:
+Default loss is token-averaged symmetric JSD over the full vocabulary:
 
 ```
 JSD_β(pT ‖ pS) = β · KL(pT ‖ m) + (1-β) · KL(pS ‖ m),   m = β·pT + (1-β)·pS
 ```
 
-Default `β = 0.5` (symmetric JSD). Computed in log-space for numerical stability.
+Default `β = 0.5` (symmetric JSD). You can also use sampled-token KL mode.
 
 ## Architecture Changes
 
@@ -23,9 +25,9 @@ Default `β = 0.5` (symmetric JSD). Computed in log-space for numerical stabilit
 |------|--------|
 | `per_step_core_algos.py` | Added `compute_opsd_jsd_loss()` |
 | `opentinker/backend_patch/verl/workers/opsd_worker.py` | New `OPSDActorRolloutRefWorker` subclass with `compute_opsd_vocab_log_probs` RPC (full vocab log-softmax at every response position) |
-| `http_training_server.py` | Added `train_step_opsd()`, `_build_teacher_inputs()`, `/api/v1/train_step_opsd` endpoint; selects `OPSDActorRolloutRefWorker` when `algorithm.use_opsd=True` |
-| `client/math_opsd_rl.py` | New client entry-point; overrides `train_step` to call `/api/v1/train_step_opsd` |
-| `client/client_config/math_opsd_param.yaml` | New config (no teacher model path, adds `opsd_beta`) |
+| `http_training_server.py` | Builds teacher-prompt inputs and applies OPSD advantage shaping inside `/api/v1/train_step` |
+| `client/math_opsd_rl.py` | OPSD client entry-point (standard `/api/v1/train_step` flow) |
+| `client/client_config/math_opsd_param.yaml` | OPSD config with `opsd_teacher_source` and `opsd_loss_mode` |
 
 ## Running OPSD Training
 
@@ -54,6 +56,8 @@ python opentinker/client/math_opsd_rl.py \
 | Parameter | Default | Description |
 |-----------|---------|-------------|
 | `opsd_beta` | `0.5` | JSD mixture weight β (0.5 = symmetric) |
+| `opsd_teacher_source` | `online` | `online` (teacher follows actor) or `initial_frozen` (teacher fixed to initialization checkpoint) |
+| `opsd_loss_mode` | `full_jsd` | `full_jsd` (full-vocab JSD) or `sampled_kl` (sampled-token KL) |
 | `rollout_n` | `1` | Rollouts per prompt (1 is typical for OPSD) |
 | `temperature` | `0.7` | Sampling temperature for student rollout |
 | `max_prompt_tokens` | `4096` | Max tokens; teacher prompt is left-truncated to this |
@@ -66,6 +70,7 @@ Key metrics logged to WandB:
 | Metric | Description |
 |--------|-------------|
 | `opsd/jsd_per_token` | Mean JSD per response token (should decrease during training) |
+| `opsd/sampled_kl_per_token` | Mean sampled-token KL (when `opsd_loss_mode=sampled_kl`) |
 | `opsd/jsd_beta` | β value (informational) |
 | `actor/pg_loss` | Policy gradient loss via update_actor |
 | `actor/grad_norm` | Gradient norm |
@@ -74,8 +79,8 @@ Key metrics logged to WandB:
 
 | Aspect | `math_distill_rl` | `math_opsd_rl` (this) |
 |--------|-------------------|----------------------|
-| Teacher model | Separate checkpoint | Same model, different prompt |
-| Loss | KL subtracted from GRPO advantage | Pure full-vocab JSD |
+| Teacher model | Separate checkpoint | Prompted teacher on same base model (`online` or `initial_frozen`) |
+| Loss | KL subtracted from GRPO advantage | `full_jsd` or `sampled_kl` |
 | RefPolicy worker | Yes (loads teacher weights) | No |
 | Data required | `prompt` | `prompt` + `ground_truth` |
 | LoRA support | Yes | Not required (full-param) |
@@ -92,6 +97,34 @@ Same parquet format as standard RLVR training:
 ```
 
 The `ground_truth` is automatically used to construct the teacher prompt at training time.
+
+## Mode Examples
+
+### Initial frozen teacher + full JSD
+
+```bash
+python opentinker/client/math_opsd_rl.py \
+    tokenizer_path=Qwen/Qwen2.5-3B-Instruct \
+    data_path=data/math/train.parquet \
+    val_data_path=data/math/test_by_level/test_level_4.parquet \
+    opsd_teacher_source=initial_frozen \
+    opsd_loss_mode=full_jsd \
+    opsd_beta=0.5 \
+    scheduler_url=http://localhost:8780
+```
+
+### Initial frozen teacher + sampled KL
+
+```bash
+python opentinker/client/math_opsd_rl.py \
+    tokenizer_path=Qwen/Qwen2.5-3B-Instruct \
+    data_path=data/math/train.parquet \
+    val_data_path=data/math/test_by_level/test_level_4.parquet \
+    opsd_teacher_source=initial_frozen \
+    opsd_loss_mode=sampled_kl \
+    opsd_jsd_coef=1.0 \
+    scheduler_url=http://localhost:8780
+```
 
 ## Testing
 

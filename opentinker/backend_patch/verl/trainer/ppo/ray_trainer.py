@@ -84,6 +84,7 @@ from opentinker.backend_patch.verl.trainer.ppo.per_step_core_algos import (
     compute_grpo_per_step_advantage,
     incorporate_kl_penalty_in_advantage,
 )
+from opentinker.server.opsd_config import should_use_initial_frozen_teacher
 
 
 @dataclass
@@ -873,10 +874,15 @@ class RayPPOTrainer:
             resource_pool = self.resource_pool_manager.get_resource_pool(
                 Role.ActorRollout
             )
+            actor_role = (
+                "actor_rollout_ref"
+                if should_use_initial_frozen_teacher(self.config.algorithm)
+                else str(Role.ActorRollout)
+            )
             actor_rollout_cls = RayClassWithInitArgs(
                 cls=self.role_worker_mapping[Role.ActorRollout],
                 config=self.config.actor_rollout_ref,
-                role=str(Role.ActorRollout),
+                role=actor_role,
             )
             self.resource_pool_to_cls[resource_pool][str(Role.ActorRollout)] = (
                 actor_rollout_cls
