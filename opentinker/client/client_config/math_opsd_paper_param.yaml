@@ -1,0 +1,108 @@
+# OPSD paper-like config for arXiv:2601.18734 (math single-turn)
+#
+# Goal: match the paper setup as closely as possible in OpenTinker
+# while reusing the current OPSD pipeline.
+
+# Project settings
+project_name: opentinker
+experiment_name: math_opsd_paper_2601_18734
+
+# Logging
+logger_backends: ["console", "wandb"]
+wandb_key: null
+
+# Model and tokenizer
+tokenizer_path: null
+
+# null -> fixed teacher uses the initial student checkpoint.
+teacher_model_path: null
+
+# Data paths
+data_path: null
+val_data_path: null
+
+# Training parameters
+batch_size: 32
+num_workers: 0
+num_epochs: null
+num_steps: 1000
+save_freq: 200
+test_freq: 50
+
+# Validation parameters
+val_batch_size: 124
+val_n: 16
+val_temperature: 1.2
+
+# Generation parameters
+temperature: 1.2
+top_p: 1.0
+max_new_tokens: 2048
+max_prompt_tokens: 4096
+
+# Rollout sampling count per prompt
+rollout_n: 1
+
+# Algorithm settings
+algorithm:
+  adv_estimator: "grpo"
+  use_kl_in_advantage: true
+  disable_rl_reward: true
+  kl_penalty_coef: 0.1
+  opsd:
+    enable: true
+    teacher_mode: "fixed"
+
+# Legacy scheduler compatibility
+adv_estimator: ${algorithm.adv_estimator}
+
+# Full-parameter training (no LoRA)
+lora:
+  lora_rank: 0
+  lora_alpha: 16
+  target_modules: "all-linear"
+  exclude_modules: null
+  lora_adapter_path: null
+
+# Low-level server overrides merged into PPO server config.
+server_overrides:
+  actor_rollout_ref:
+    model:
+      enable_gradient_checkpointing: true
+      use_remove_padding: true
+      lora_rank: 0
+    rollout:
+      prompt_length: ${max_prompt_tokens}
+      response_length: ${max_new_tokens}
+    actor:
+      ppo_mini_batch_size: 32
+      ppo_micro_batch_size_per_gpu: 1
+      ppo_epochs: 1
+      optim:
+        lr: 2.0e-5
+        lr_warmup_steps_ratio: 0.1
+        lr_scheduler_type: cosine
+
+# Interaction configuration
+interaction:
+  name: math
+  class_path: opentinker.environment.gym_environment_interaction.GymEnvironmentInteraction
+  config:
+    env_host: 0.0.0.0
+    env_port: 8088
+    env_endpoint: http://${interaction.config.env_host}:${interaction.config.env_port}
+    max_steps: 1
+
+multi_turn:
+  max_user_turns: 0
+  max_assistant_turns: 1
+  max_tokens_per_turn: 4096
+  weave_project: null
+  experiment_name: "math_opsd_interaction"
+
+# Scheduler settings
+scheduler_url: "http://0.0.0.0:8780"
+scheduler_api_key: null
+
+# GPU settings
+num_gpus: 8

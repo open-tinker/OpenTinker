@@ -28,6 +28,7 @@ def main(args):
     print(f"  algorithm.opsd.enable  : {algo.get('opsd', {}).get('enable', False)}")
     print(f"  algorithm.opsd.teacher_mode : {algo.get('opsd', {}).get('teacher_mode', 'fixed')}")
     print(f"  teacher_model_path     : {args.get('teacher_model_path', None)}")
+    print(f"  lora_rank              : {args.get('lora', {}).get('lora_rank', 0)}")
     print("=" * 60)
 
     scheduler_client = SchedulerClient(
@@ -69,6 +70,21 @@ def main(args):
         logger_backends=args.logger_backends,
     )
 
+    lora_cfg = {}
+    if hasattr(args, "lora") and args.lora is not None:
+        lora_cfg = OmegaConf.to_container(args.lora, resolve=True)
+    model_cfg = {"path": args.tokenizer_path}
+    if lora_cfg:
+        for key in [
+            "lora_rank",
+            "lora_alpha",
+            "target_modules",
+            "exclude_modules",
+            "lora_adapter_path",
+        ]:
+            if key in lora_cfg:
+                model_cfg[key] = lora_cfg[key]
+
     server_cfg = OmegaConf.create(
         {
             "data": {
@@ -76,7 +92,7 @@ def main(args):
                 "max_response_length": args.max_new_tokens,
             },
             "actor_rollout_ref": {
-                "model": {"path": args.tokenizer_path},
+                "model": model_cfg,
                 "rollout": {
                     "tensor_model_parallel_size": 2 if args.num_gpus > 1 else 1,
                     "n": int(args.rollout_n),
@@ -101,6 +117,14 @@ def main(args):
             },
         }
     )
+
+    server_overrides = args.get("server_overrides", None)
+    if server_overrides:
+        server_cfg = OmegaConf.merge(
+            server_cfg,
+            OmegaConf.create(OmegaConf.to_container(server_overrides, resolve=True)),
+        )
+        print("✓ Applied server_overrides")
 
     teacher_path = args.get("teacher_model_path", None)
     if teacher_path:

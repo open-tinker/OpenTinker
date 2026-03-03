@@ -2,6 +2,9 @@
 
 This recipe enables OPSD teacher-context distillation in OpenTinker while keeping the existing RL pipeline.
 
+For a paper-like runbook targeting arXiv:2601.18734 settings, see:
+- [docs/math_opsd_paper_repro.md](./math_opsd_paper_repro.md)
+
 ## What `algorithm.opsd.enable` does
 
 When `algorithm.opsd.enable=true`, the server computes `ref_log_prob` using a privileged teacher context:

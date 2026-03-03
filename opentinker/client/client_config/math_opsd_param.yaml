@@ -63,7 +63,7 @@ algorithm:
     # Teacher parameter mode:
     # - fixed: teacher is a frozen reference model (default)
     # - shared: teacher shares current student parameters (OPSD teacher-context only)
-    teacher_mode: "shared"
+    teacher_mode: "fixed"
 
 # Legacy scheduler compatibility: mirror estimator at top-level.
 # New code reads algorithm.adv_estimator first-class; this keeps old scheduler versions working too.
@@ -76,6 +76,10 @@ lora:
   target_modules: "all-linear"
   exclude_modules: null
   lora_adapter_path: null
+
+# Optional low-level server overrides merged into PPO server config.
+# Keep this minimal and reuse defaults where possible.
+server_overrides: {}
 
 # Interaction configuration
 interaction:

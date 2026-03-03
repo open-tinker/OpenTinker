@@ -17,7 +17,8 @@ from verl.utils.model import compute_position_id_with_mask
 DEFAULT_TEACHER_PROMPT_TEMPLATE = (
     "Problem:\n{question}\n\n"
     "Here is a reference solution:\n{cot}\n\n"
-    "After understanding the reference solution, solve the problem again.\n"
+    "After understanding the reference solution, please try to solve this problem\n"
+    "using your own approach below:\n"
     "Answer:"
 )
 

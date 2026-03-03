@@ -1095,40 +1095,7 @@ class PPOTrainingServerBackend:
 
             # 6. Compute old_log_probs
             with marked_timer("old_log_prob", timing_raw, color="blue"):
-                # ===== DEBUG LOGGING START =====
-                logger.info("=" * 80)
-                logger.info(
-                    f"[OPENTINKER] Batch state before compute_log_prob (step {self.global_steps})"
-                )
-                logger.info(f"  batch.batch keys: {list(batch.batch.keys())}")
-                logger.info(f"  responses shape: {batch.batch['responses'].shape}")
-                logger.info(f"  input_ids shape: {batch.batch['input_ids'].shape}")
-                logger.info(
-                    f"  attention_mask shape: {batch.batch['attention_mask'].shape}"
-                )
-                logger.info(
-                    f"  response_mask shape: {batch.batch['response_mask'].shape}"
-                )
-                logger.info(
-                    f"  response_mask sum: {batch.batch['response_mask'].sum().item()}"
-                )
-                logger.info(
-                    f"  response_mask mean: {batch.batch['response_mask'].float().mean().item()}"
-                )
-                logger.info(
-                    f"  First response (first 20 tokens): {batch.batch['responses'][0, :20].tolist()}"
-                )
-                logger.info(
-                    f"  First response_mask (first 20): {batch.batch['response_mask'][0, :20].tolist()}"
-                )
-                logger.info(f"  batch.meta_info: {batch.meta_info}")
-                logger.info("=" * 80)
-                # ===== DEBUG LOGGING END =====
-
                 old_log_prob = self.actor_rollout_wg.compute_log_prob(batch)
-                logger.info(
-                    f"DEBUG: old_log_prob keys: {list(old_log_prob.batch.keys())}"
-                )
                 entropys = old_log_prob.batch["entropys"]
                 response_masks = batch.batch["response_mask"]
 
@@ -1142,26 +1109,9 @@ class PPOTrainingServerBackend:
                 )
                 old_log_prob_metrics = {"actor/entropy": entropy_agg.detach().item()}
 
-                # ===== DEBUG LOGGING START =====
-                logger.info(
-                    f"[OPENTINKER] After compute_log_prob (step {self.global_steps})"
-                )
-                logger.info(f"  entropys shape: {entropys.shape}")
-                logger.info(f"  entropys mean: {entropys.mean().item()}")
-                logger.info(f"  entropys std: {entropys.std().item()}")
-                logger.info(f"  entropy_agg (actor/entropy): {entropy_agg.item()}")
-                logger.info(
-                    f"  First entropy values (first 20): {entropys[0, :20].tolist()}"
-                )
-                logger.info("=" * 80)
-                # ===== DEBUG LOGGING END =====
-
                 metrics.update(old_log_prob_metrics)
                 old_log_prob.batch.pop("entropys")
                 batch = batch.union(old_log_prob)
-                logger.info(
-                    f"DEBUG: batch keys after old_log_prob union: {list(batch.batch.keys())}"
-                )
 
                 # Calculate debug metrics for rollout vs actor log probs mismatch
                 if "rollout_log_probs" in batch.batch.keys():
