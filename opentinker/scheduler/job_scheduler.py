@@ -1055,8 +1055,16 @@ class JobSchedulerActor:
         # Debug: log job.config keys to verify parameters are being received
         logger.info(f"Job {job.job_id}: Config keys: {list(job.config.keys())}")
 
-        # Forward algorithm parameters from client config
+        # Forward algorithm parameters from client config.
+        # Backward compatibility:
+        # - legacy clients place adv_estimator at top-level
+        # - newer clients place it under algorithm.adv_estimator
         adv_estimator = job.config.get("adv_estimator")
+        if adv_estimator is None:
+            algorithm_cfg = job.config.get("algorithm")
+            if isinstance(algorithm_cfg, dict):
+                adv_estimator = algorithm_cfg.get("adv_estimator")
+
         if adv_estimator:
             cmd.append(f"algorithm.adv_estimator={adv_estimator}")
             logger.info(f"Job {job.job_id}: ✓ Forwarding adv_estimator={adv_estimator}")

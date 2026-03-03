@@ -85,6 +85,10 @@ from opentinker.backend_patch.verl.trainer.ppo.reward import (
     compute_reward_async,
     load_reward_manager,
 )
+from opentinker.server.opsd_utils import (
+    DEFAULT_TEACHER_PROMPT_TEMPLATE,
+    build_teacher_ref_batch,
+)
 
 
 # Configure logging
@@ -369,6 +373,36 @@ def deserialize_dataproto(data_dict: Dict[str, Any]) -> DataProto:
     )
 
 
+def compute_pass_at_k(
+    scores: list[float], uids: list[Any], k: int
+) -> Optional[float]:
+    """Compute pass@k (best@k) by uid grouping.
+
+    Returns None when k<=1 or grouping is invalid (e.g., non-uniform group sizes).
+    """
+    if k <= 1:
+        return None
+    if len(scores) == 0 or len(scores) != len(uids):
+        return None
+
+    uid_to_scores: dict[str, list[float]] = {}
+    for uid, score in zip(uids, scores, strict=True):
+        uid_key = str(uid)
+        if uid_key not in uid_to_scores:
+            uid_to_scores[uid_key] = []
+        uid_to_scores[uid_key].append(float(score))
+
+    if not uid_to_scores:
+        return None
+
+    for group_scores in uid_to_scores.values():
+        if len(group_scores) != k:
+            return None
+
+    best_scores = [max(group_scores) for group_scores in uid_to_scores.values()]
+    return float(np.mean(best_scores))
+
+
 # ==================== helper function for worker initialization ====================
 
 
@@ -483,12 +517,29 @@ def build_role_worker_mapping(config):
     else:
         print(f"✗ Critic not needed (adv_estimator={config.algorithm.adv_estimator})")
 
-    # Reference policy (if KL loss, KL reward, or KL-in-advantage is used)
-    if hasattr(config, "algorithm") and (
+    # Reference policy worker.
+    # For OPSD with shared teacher params, ref_log_prob can be computed by the current actor,
+    # so no standalone RefPolicy worker is needed unless other KL paths require it.
+    opsd_cfg = config.algorithm.get("opsd", {}) if hasattr(config, "algorithm") else {}
+    opsd_enabled = bool(opsd_cfg.get("enable", False))
+    opsd_teacher_mode = str(opsd_cfg.get("teacher_mode", "fixed")).lower()
+    if opsd_teacher_mode not in {"fixed", "shared"}:
+        raise ValueError(
+            f"Invalid algorithm.opsd.teacher_mode={opsd_teacher_mode!r}. "
+            "Expected one of: 'fixed', 'shared'."
+        )
+    opsd_shared_teacher = opsd_enabled and opsd_teacher_mode == "shared"
+
+    need_ref_policy_worker = hasattr(config, "algorithm") and (
         config.algorithm.use_kl_in_reward
         or config.actor_rollout_ref.actor.use_kl_loss
-        or config.algorithm.get("use_kl_in_advantage", False)
-    ):
+        or (
+            config.algorithm.get("use_kl_in_advantage", False)
+            and not opsd_shared_teacher
+        )
+        or (opsd_enabled and not opsd_shared_teacher)
+    )
+    if need_ref_policy_worker:
         # Use the same actor rollout class for reference policy
         if config.actor_rollout_ref.actor.strategy in {"fsdp", "fsdp2"}:
             from verl.workers.fsdp_workers import ActorRolloutRefWorker
@@ -501,6 +552,8 @@ def build_role_worker_mapping(config):
 
         role_worker_mapping[Role.RefPolicy] = ray.remote(ActorRolloutRefWorker)
         print("✓ RefPolicy worker added to role_worker_mapping")
+    elif opsd_shared_teacher:
+        print("✓ OPSD shared teacher mode: ref_log_prob will use current actor")
 
     # Reward model
     if config.reward_model.enable:
@@ -661,6 +714,17 @@ class PPOTrainingServerBackend:
         self.use_rm = self.trainer.use_rm
         self.ref_in_actor = self.trainer.ref_in_actor
         self.async_rollout_mode = False  # Will be set after init_workers
+        opsd_cfg = self.config.algorithm.get("opsd", {})
+        self.opsd_enabled = bool(opsd_cfg.get("enable", False))
+        self.opsd_teacher_mode = str(opsd_cfg.get("teacher_mode", "fixed")).lower()
+        if self.opsd_teacher_mode not in {"fixed", "shared"}:
+            raise ValueError(
+                f"Invalid algorithm.opsd.teacher_mode={self.opsd_teacher_mode!r}. "
+                "Expected one of: 'fixed', 'shared'."
+            )
+        self.opsd_shared_teacher = (
+            self.opsd_enabled and self.opsd_teacher_mode == "shared"
+        )
 
         # KL control
         if self.config.algorithm.use_kl_in_reward:
@@ -886,6 +950,14 @@ class PPOTrainingServerBackend:
         try:
             metrics = {}
             timing_raw = {}
+            metrics["distill/opsd_active"] = 0.0
+            metrics["distill/opsd_teacher_shared"] = (
+                1.0 if self.opsd_shared_teacher else 0.0
+            )
+            metrics["distill/opsd_teacher_prompt_len_mean"] = 0.0
+            metrics["distill/opsd_teacher_prompt_len_max"] = 0.0
+            metrics["distill/opsd_teacher_prompt_len_min"] = 0.0
+            metrics["distill/opsd_missing_cot_count"] = 0.0
 
             # 1. Prepare generation batch
             start_time = time.time()
@@ -1098,12 +1170,54 @@ class PPOTrainingServerBackend:
                     metrics.update(calculate_debug_metrics(batch))
 
             # 7. Compute ref_log_prob if needed
-            if self.use_reference_policy:
+            if self.use_reference_policy or self.opsd_shared_teacher:
                 with marked_timer("ref_log_prob", timing_raw, color="olive"):
-                    if not self.ref_in_actor:
-                        ref_log_prob = self.ref_policy_wg.compute_ref_log_prob(batch)
+                    ref_input_batch = batch
+                    opsd_enabled = self.opsd_enabled
+
+                    if opsd_enabled:
+                        metrics["distill/opsd_active"] = 1.0
+                        teacher_prompt_template = DEFAULT_TEACHER_PROMPT_TEMPLATE
+                        opsd_result = build_teacher_ref_batch(
+                            batch=batch,
+                            tokenizer=self.tokenizer,
+                            prompt_template=teacher_prompt_template,
+                        )
+                        ref_input_batch = opsd_result.ref_batch
+                        if opsd_result.teacher_prompt_token_lens:
+                            prompt_token_lens = opsd_result.teacher_prompt_token_lens
+                            metrics["distill/opsd_teacher_prompt_len_mean"] = float(
+                                np.mean(prompt_token_lens)
+                            )
+                            metrics["distill/opsd_teacher_prompt_len_max"] = float(
+                                max(prompt_token_lens)
+                            )
+                            metrics["distill/opsd_teacher_prompt_len_min"] = float(
+                                min(prompt_token_lens)
+                            )
+                        metrics["distill/opsd_missing_cot_count"] = float(
+                            opsd_result.missing_cot_count
+                        )
+
+                    if self.opsd_shared_teacher and opsd_enabled:
+                        shared_ref_log_prob = self.actor_rollout_wg.compute_log_prob(
+                            ref_input_batch
+                        )
+                        ref_log_prob = DataProto.from_dict(
+                            tensors={
+                                "ref_log_prob": shared_ref_log_prob.batch[
+                                    "old_log_probs"
+                                ]
+                            }
+                        )
+                    elif not self.ref_in_actor:
+                        ref_log_prob = self.ref_policy_wg.compute_ref_log_prob(
+                            ref_input_batch
+                        )
                     else:
-                        ref_log_prob = self.actor_rollout_wg.compute_ref_log_prob(batch)
+                        ref_log_prob = self.actor_rollout_wg.compute_ref_log_prob(
+                            ref_input_batch
+                        )
                     batch = batch.union(ref_log_prob)
 
             # 8. Compute values if using critic
@@ -1525,6 +1639,13 @@ class PPOTrainingServerBackend:
         try:
             # 1. Repeat batch based on val_kwargs.n (similar to original _validate)
             val_n = self.config.actor_rollout_ref.rollout.val_kwargs.n
+            if "uid" not in batch.non_tensor_batch:
+                import uuid
+
+                batch.non_tensor_batch["uid"] = np.array(
+                    [str(uuid.uuid4()) for _ in range(len(batch))],
+                    dtype=object,
+                )
             if val_n > 1:
                 batch = batch.repeat(repeat_times=val_n, interleave=True)
 
@@ -1596,15 +1717,26 @@ class PPOTrainingServerBackend:
                 "val/min_score": float(np.min(scores)),
             }
 
-            # pass@k: analogous to GRPO's n-sample grouping.
-            # With repeat(val_n, interleave=True), every val_n consecutive scores
-            # come from the same prompt — mirror the uid-based GRPO grouping.
+            # pass@k uses GRPO-style uid grouping and best@k aggregation.
             val_n = self.config.actor_rollout_ref.rollout.val_kwargs.n
-            if val_n > 1 and len(scores) >= val_n:
-                n_prompts = len(scores) // val_n
-                scores_arr = np.array(scores[: n_prompts * val_n]).reshape(n_prompts, val_n)
-                pass_at_k = float(np.mean(np.max(scores_arr, axis=1) >= 0.5))
-                metrics[f"val/pass_at_{val_n}"] = pass_at_k
+            if val_n > 1:
+                uids = batch.non_tensor_batch.get("uid", None)
+                if uids is None:
+                    logger.warning(
+                        "Skipping val/pass_at_%s: missing uid in validation batch",
+                        val_n,
+                    )
+                else:
+                    pass_at_k = compute_pass_at_k(scores=scores, uids=list(uids), k=val_n)
+                    if pass_at_k is None:
+                        logger.warning(
+                            "Skipping val/pass_at_%s: inconsistent uid grouping "
+                            "(expected exactly %s samples per uid)",
+                            val_n,
+                            val_n,
+                        )
+                    else:
+                        metrics[f"val/pass_at_{val_n}"] = pass_at_k
 
             # Add extra metrics from reward function
             if "reward_extra_info" in result:

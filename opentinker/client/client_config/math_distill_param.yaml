@@ -39,7 +39,7 @@ val_n: 1                 # rollouts per problem; >1 enables pass@k and auto-dedu
 # Generation parameters
 temperature: 0.7
 top_p: 1
-max_new_tokens: 8194
+max_new_tokens: 4098
 max_prompt_tokens: 4096
 
 # Algorithm
@@ -88,7 +88,7 @@ interaction:
 multi_turn:
   max_user_turns: 0
   max_assistant_turns: 1
-  max_tokens_per_turn: 8192
+  max_tokens_per_turn: 4096
   weave_project: null
   experiment_name: "math_distill_interaction"
 

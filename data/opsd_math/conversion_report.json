@@ -1,0 +1,116 @@
+{
+  "created_at_utc": "2026-03-03T01:14:19.964607+00:00",
+  "config": {
+    "output_dir": "data/opsd_math",
+    "cache_dir": null,
+    "instruction": "Let's think step by step and output the final answer within \\boxed{}.",
+    "max_train_samples": 30000,
+    "seed": 42,
+    "data_source": "DigitalLearningGmbH/MATH-lighteval"
+  },
+  "stats": {
+    "train_openthoughts": {
+      "total_rows": 113957,
+      "kept_rows": 30000,
+      "drop_non_math": 0,
+      "drop_missing_question": 0,
+      "drop_missing_teacher_hint": 0,
+      "drop_missing_ground_truth": 7,
+      "ground_truth_from_ground_truth_solution": 29946,
+      "ground_truth_from_deepseek_solution": 54
+    },
+    "test_aime24": {
+      "dataset_name": "math-ai/aime24",
+      "input_rows": 30,
+      "kept_rows": 30,
+      "drop_by_filter": 0,
+      "drop_missing_question": 0,
+      "drop_missing_ground_truth": 0
+    },
+    "test_aime25": {
+      "dataset_name": "math-ai/aime25",
+      "input_rows": 30,
+      "kept_rows": 30,
+      "drop_by_filter": 0,
+      "drop_missing_question": 0,
+      "drop_missing_ground_truth": 0
+    },
+    "test_hmmt2025": {
+      "dataset_name": "FlagEval/HMMT_2025",
+      "input_rows": 30,
+      "kept_rows": 30,
+      "drop_by_filter": 0,
+      "drop_missing_question": 0,
+      "drop_missing_ground_truth": 0
+    },
+    "test_amo_number": {
+      "dataset_name": "meituan-longcat/AMO-Bench",
+      "input_rows": 50,
+      "kept_rows": 34,
+      "drop_by_filter": 16,
+      "drop_missing_question": 0,
+      "drop_missing_ground_truth": 0
+    },
+    "test_merged_rows": 124
+  },
+  "validation": {
+    "files": {
+      "train": {
+        "path": "data/opsd_math/train_openthoughts_math.parquet",
+        "rows": 30000,
+        "valid": true,
+        "errors": []
+      },
+      "test_aime24": {
+        "path": "data/opsd_math/test_aime24.parquet",
+        "rows": 30,
+        "valid": true,
+        "errors": []
+      },
+      "test_aime25": {
+        "path": "data/opsd_math/test_aime25.parquet",
+        "rows": 30,
+        "valid": true,
+        "errors": []
+      },
+      "test_hmmt2025": {
+        "path": "data/opsd_math/test_hmmt2025.parquet",
+        "rows": 30,
+        "valid": true,
+        "errors": []
+      },
+      "test_amo_number": {
+        "path": "data/opsd_math/test_amo_number.parquet",
+        "rows": 34,
+        "valid": true,
+        "errors": []
+      },
+      "test_merged": {
+        "path": "data/opsd_math/test_merged.parquet",
+        "rows": 124,
+        "valid": true,
+        "errors": []
+      }
+    },
+    "all_valid": true,
+    "merged_size_check": {
+      "valid": true,
+      "expected": 124,
+      "actual": 124
+    }
+  },
+  "smoke_test": {
+    "sample_size": 10,
+    "ran": 10,
+    "pass_count": 10,
+    "errors": []
+  },
+  "output_files": {
+    "train": "data/opsd_math/train_openthoughts_math.parquet",
+    "test_aime24": "data/opsd_math/test_aime24.parquet",
+    "test_aime25": "data/opsd_math/test_aime25.parquet",
+    "test_hmmt2025": "data/opsd_math/test_hmmt2025.parquet",
+    "test_amo_number": "data/opsd_math/test_amo_number.parquet",
+    "test_merged": "data/opsd_math/test_merged.parquet"
+  }
+}

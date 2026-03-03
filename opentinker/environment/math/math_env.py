@@ -102,7 +102,7 @@ class MathGameEnvironment(GameEnvironment):
                 interaction_name=self.interaction_name,
                 prompt_key="prompt",
                 ground_truth_key="ground_truth",
-                shuffle=False,  # No shuffle - keep samples fixed
+                shuffle=True,  # No shuffle - keep samples fixed
                 seed=42,
                 system_prompt=math_game_for_prompt.get_system_prompt(),
                 deduplicate=getattr(self.config, "val_n", 1) > 1,
@@ -121,7 +121,7 @@ class MathGameEnvironment(GameEnvironment):
             self.val_dataloader = StatefulDataLoader(
                 val_dataset,
                 batch_size=val_batch_size,
-                shuffle=False,
+                shuffle=True,
                 num_workers=getattr(self.config, "num_workers", 0),
                 collate_fn=collate_fn,
                 drop_last=False,

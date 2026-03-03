@@ -248,7 +248,20 @@ class DynamicGameDataset(Dataset):
             "env_kwargs": env_kwargs,
         }
         row_dict["tools_kwargs"] = sample.get("tools_kwargs", {})
-        row_dict["extra_info"] = {"interaction_kwargs": row_dict["interaction_kwargs"]}
+
+        # Keep dataset-provided extra_info (e.g., privileged CoT in extra_info.answer),
+        # and always attach interaction_kwargs for env routing/reward compatibility.
+        merged_extra_info = {}
+        sample_extra_info = sample.get("extra_info")
+        if isinstance(sample_extra_info, dict):
+            merged_extra_info.update(sample_extra_info)
+
+        env_extra_info = env_kwargs.get("extra_info")
+        if isinstance(env_extra_info, dict):
+            merged_extra_info.update(env_extra_info)
+
+        merged_extra_info["interaction_kwargs"] = row_dict["interaction_kwargs"]
+        row_dict["extra_info"] = merged_extra_info
 
         # Add reward_model field for NaiveRewardManager compatibility
         # NaiveRewardManager expects ground_truth at non_tensor_batch["reward_model"]["ground_truth"]
