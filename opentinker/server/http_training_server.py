@@ -89,6 +89,11 @@ from opentinker.server.opsd_utils import (
     DEFAULT_TEACHER_PROMPT_TEMPLATE,
     build_teacher_ref_batch,
 )
+from opentinker.server.opsd_config_utils import (
+    resolve_opsd_runtime_flags,
+    should_create_ref_policy_worker,
+    validate_opsd_full_vocab_jsd_config,
+)
 
 
 # Configure logging
@@ -100,6 +105,31 @@ _training_server: Optional["PPOTrainingServerBackend"] = None
 _server_cfg = None
 _generation_config = None
 _config_ready_event = threading.Event()
+
+
+def _sanitize_metrics_for_json(metrics: Dict[str, Any], context: str) -> Dict[str, float]:
+    """Convert metrics to JSON-safe finite floats."""
+    sanitized: Dict[str, float] = {}
+    for key, value in metrics.items():
+        try:
+            if isinstance(value, torch.Tensor):
+                if value.numel() != 1:
+                    continue
+                value = value.item()
+            metric_value = float(value)
+        except (TypeError, ValueError):
+            continue
+
+        if not np.isfinite(metric_value):
+            logger.warning(
+                "[%s] Non-finite metric %s=%r detected; replacing with 0.0",
+                context,
+                key,
+                value,
+            )
+            metric_value = 0.0
+        sanitized[key] = metric_value
+    return sanitized
 
 
 # ==================== Pydantic Models for API ====================
@@ -452,6 +482,40 @@ def build_resource_pool_manager(config):
     return ResourcePoolManager(resource_pool_spec=resource_pool_spec, mapping=mapping)
 
 
+def _resolve_opsd_runtime_flags(config):
+    return resolve_opsd_runtime_flags(config)
+
+
+def _validate_opsd_full_vocab_jsd_config(
+    config,
+    *,
+    opsd_enabled: bool,
+    opsd_full_vocab_jsd_enabled: bool,
+    **_,
+):
+    validate_opsd_full_vocab_jsd_config(
+        config,
+        opsd_enabled=opsd_enabled,
+        opsd_full_vocab_jsd_enabled=opsd_full_vocab_jsd_enabled,
+    )
+
+
+def _should_create_ref_policy_worker(
+    config,
+    *,
+    opsd_enabled: bool,
+    opsd_shared_teacher: bool,
+    opsd_full_vocab_jsd_enabled: bool,
+    **_,
+) -> bool:
+    return should_create_ref_policy_worker(
+        config,
+        opsd_enabled=opsd_enabled,
+        opsd_shared_teacher=opsd_shared_teacher,
+        opsd_full_vocab_jsd_enabled=opsd_full_vocab_jsd_enabled,
+    )
+
+
 def build_role_worker_mapping(config):
     """Build role to worker class mapping"""
     from verl.trainer.ppo.ray_trainer import Role
@@ -463,7 +527,7 @@ def build_role_worker_mapping(config):
     # Actor rollout - based on strategy
     if config.actor_rollout_ref.hybrid_engine:
         if config.actor_rollout_ref.actor.strategy in {"fsdp", "fsdp2"}:
-            from verl.workers.fsdp_workers import (
+            from opentinker.backend_patch.verl.workers.fsdp_workers import (
                 ActorRolloutRefWorker,
                 AsyncActorRolloutRefWorker,
             )
@@ -520,29 +584,33 @@ def build_role_worker_mapping(config):
     # Reference policy worker.
     # For OPSD with shared teacher params, ref_log_prob can be computed by the current actor,
     # so no standalone RefPolicy worker is needed unless other KL paths require it.
-    opsd_cfg = config.algorithm.get("opsd", {}) if hasattr(config, "algorithm") else {}
-    opsd_enabled = bool(opsd_cfg.get("enable", False))
-    opsd_teacher_mode = str(opsd_cfg.get("teacher_mode", "fixed")).lower()
-    if opsd_teacher_mode not in {"fixed", "shared"}:
-        raise ValueError(
-            f"Invalid algorithm.opsd.teacher_mode={opsd_teacher_mode!r}. "
-            "Expected one of: 'fixed', 'shared'."
-        )
-    opsd_shared_teacher = opsd_enabled and opsd_teacher_mode == "shared"
+    opsd_flags = _resolve_opsd_runtime_flags(config)
+    opsd_enabled = opsd_flags["opsd_enabled"]
+    opsd_full_vocab_jsd_enabled = opsd_flags["opsd_full_vocab_jsd_enabled"]
+    opsd_shared_teacher = opsd_flags["opsd_shared_teacher"]
+    _validate_opsd_full_vocab_jsd_config(config, **opsd_flags)
 
-    need_ref_policy_worker = hasattr(config, "algorithm") and (
-        config.algorithm.use_kl_in_reward
-        or config.actor_rollout_ref.actor.use_kl_loss
-        or (
-            config.algorithm.get("use_kl_in_advantage", False)
-            and not opsd_shared_teacher
+    if opsd_full_vocab_jsd_enabled and config.actor_rollout_ref.actor.strategy not in {
+        "fsdp",
+        "fsdp2",
+    }:
+        raise NotImplementedError(
+            "algorithm.opsd.full_vocab_jsd currently supports FSDP/FSDP2 actor strategy only."
         )
-        or (opsd_enabled and not opsd_shared_teacher)
-    )
+    if opsd_enabled and opsd_full_vocab_jsd_enabled and bool(
+        config.actor_rollout_ref.actor.get("use_kl_loss", False)
+    ):
+        print(
+            "⚠ full_vocab_jsd mode ignores actor_rollout_ref.actor.use_kl_loss=true."
+        )
+
+    need_ref_policy_worker = _should_create_ref_policy_worker(config, **opsd_flags)
     if need_ref_policy_worker:
         # Use the same actor rollout class for reference policy
         if config.actor_rollout_ref.actor.strategy in {"fsdp", "fsdp2"}:
-            from verl.workers.fsdp_workers import ActorRolloutRefWorker
+            from opentinker.backend_patch.verl.workers.fsdp_workers import (
+                ActorRolloutRefWorker,
+            )
         elif config.actor_rollout_ref.actor.strategy == "megatron":
             from verl.workers.megatron_workers import ActorRolloutRefWorker
         else:
@@ -552,6 +620,8 @@ def build_role_worker_mapping(config):
 
         role_worker_mapping[Role.RefPolicy] = ray.remote(ActorRolloutRefWorker)
         print("✓ RefPolicy worker added to role_worker_mapping")
+    elif opsd_enabled and opsd_full_vocab_jsd_enabled:
+        print("✓ OPSD full_vocab_jsd mode: skip standalone RefPolicy worker")
     elif opsd_shared_teacher:
         print("✓ OPSD shared teacher mode: ref_log_prob will use current actor")
 
@@ -717,6 +787,37 @@ class PPOTrainingServerBackend:
         opsd_cfg = self.config.algorithm.get("opsd", {})
         self.opsd_enabled = bool(opsd_cfg.get("enable", False))
         self.opsd_teacher_mode = str(opsd_cfg.get("teacher_mode", "fixed")).lower()
+        self.val_max_new_tokens = self.config.get("val_max_new_tokens", None)
+        if self.val_max_new_tokens is not None:
+            self.val_max_new_tokens = int(self.val_max_new_tokens)
+        self.opsd_full_vocab_cfg = opsd_cfg.get("full_vocab_jsd", {})
+        self.opsd_full_vocab_jsd_enabled = bool(
+            self.opsd_full_vocab_cfg.get("enable", False)
+        )
+        self.opsd_distill_mode = str(
+            self.opsd_full_vocab_cfg.get("distill_mode", "full_vocab_jsd")
+        ).lower()
+        self.opsd_topk = int(self.opsd_full_vocab_cfg.get("topk", 32))
+        if self.opsd_distill_mode not in {"full_vocab_jsd", "topk_reverse_kl_tail"}:
+            raise ValueError(
+                f"Unsupported algorithm.opsd.full_vocab_jsd.distill_mode={self.opsd_distill_mode!r}. "
+                "Expected one of: 'full_vocab_jsd', 'topk_reverse_kl_tail'."
+            )
+        if self.opsd_distill_mode == "topk_reverse_kl_tail" and self.opsd_topk <= 0:
+            raise ValueError(
+                f"algorithm.opsd.full_vocab_jsd.topk must be > 0, got {self.opsd_topk}"
+            )
+        self.opsd_jsd_beta = float(self.opsd_full_vocab_cfg.get("beta", 0.5))
+        self.opsd_jsd_coef = float(self.opsd_full_vocab_cfg.get("coef", 1.0))
+        self.opsd_jsd_vocab_chunk_size = int(
+            self.opsd_full_vocab_cfg.get("vocab_chunk_size", 4096)
+        )
+        self.opsd_jsd_token_chunk_size = int(
+            self.opsd_full_vocab_cfg.get("token_chunk_size", 0)
+        )
+        self.opsd_jsd_teacher_logits_cpu_offload = bool(
+            self.opsd_full_vocab_cfg.get("teacher_logits_cpu_offload", True)
+        )
         if self.opsd_teacher_mode not in {"fixed", "shared"}:
             raise ValueError(
                 f"Invalid algorithm.opsd.teacher_mode={self.opsd_teacher_mode!r}. "
@@ -958,6 +1059,56 @@ class PPOTrainingServerBackend:
             metrics["distill/opsd_teacher_prompt_len_max"] = 0.0
             metrics["distill/opsd_teacher_prompt_len_min"] = 0.0
             metrics["distill/opsd_missing_cot_count"] = 0.0
+            metrics["distill/full_vocab_jsd_active"] = (
+                1.0 if self.opsd_full_vocab_jsd_enabled else 0.0
+            )
+            metrics["distill/full_vocab_jsd_beta"] = (
+                self.opsd_jsd_beta
+                if (
+                    self.opsd_full_vocab_jsd_enabled
+                    and self.opsd_distill_mode == "full_vocab_jsd"
+                )
+                else 0.0
+            )
+            metrics["distill/full_vocab_jsd_coef"] = (
+                self.opsd_jsd_coef if self.opsd_full_vocab_jsd_enabled else 0.0
+            )
+            metrics["distill/full_vocab_jsd_vocab_chunk_size"] = (
+                float(self.opsd_jsd_vocab_chunk_size)
+                if self.opsd_full_vocab_jsd_enabled
+                else 0.0
+            )
+            metrics["distill/full_vocab_jsd_token_chunk_size"] = (
+                float(self.opsd_jsd_token_chunk_size)
+                if self.opsd_full_vocab_jsd_enabled
+                else 0.0
+            )
+            metrics["distill/full_vocab_jsd_teacher_logits_cpu_offload"] = (
+                1.0
+                if (self.opsd_full_vocab_jsd_enabled and self.opsd_jsd_teacher_logits_cpu_offload)
+                else 0.0
+            )
+            metrics["distill/opsd_distill_mode_full_vocab_jsd"] = (
+                1.0
+                if (self.opsd_full_vocab_jsd_enabled and self.opsd_distill_mode == "full_vocab_jsd")
+                else 0.0
+            )
+            metrics["distill/opsd_distill_mode_topk_reverse_kl_tail"] = (
+                1.0
+                if (
+                    self.opsd_full_vocab_jsd_enabled
+                    and self.opsd_distill_mode == "topk_reverse_kl_tail"
+                )
+                else 0.0
+            )
+            metrics["distill/topk_tail_reverse_kl_k"] = (
+                float(self.opsd_topk)
+                if (
+                    self.opsd_full_vocab_jsd_enabled
+                    and self.opsd_distill_mode == "topk_reverse_kl_tail"
+                )
+                else 0.0
+            )
 
             # 1. Prepare generation batch
             start_time = time.time()
@@ -1119,8 +1270,12 @@ class PPOTrainingServerBackend:
 
                     metrics.update(calculate_debug_metrics(batch))
 
-            # 7. Compute ref_log_prob if needed
-            if self.use_reference_policy or self.opsd_shared_teacher:
+            # 7. Compute ref_log_prob / teacher-context tensors if needed
+            if (
+                self.use_reference_policy
+                or self.opsd_shared_teacher
+                or self.opsd_full_vocab_jsd_enabled
+            ):
                 with marked_timer("ref_log_prob", timing_raw, color="olive"):
                     ref_input_batch = batch
                     opsd_enabled = self.opsd_enabled
@@ -1149,26 +1304,38 @@ class PPOTrainingServerBackend:
                             opsd_result.missing_cot_count
                         )
 
-                    if self.opsd_shared_teacher and opsd_enabled:
-                        shared_ref_log_prob = self.actor_rollout_wg.compute_log_prob(
-                            ref_input_batch
-                        )
-                        ref_log_prob = DataProto.from_dict(
-                            tensors={
-                                "ref_log_prob": shared_ref_log_prob.batch[
-                                    "old_log_probs"
-                                ]
-                            }
-                        )
-                    elif not self.ref_in_actor:
-                        ref_log_prob = self.ref_policy_wg.compute_ref_log_prob(
-                            ref_input_batch
-                        )
-                    else:
-                        ref_log_prob = self.actor_rollout_wg.compute_ref_log_prob(
-                            ref_input_batch
-                        )
-                    batch = batch.union(ref_log_prob)
+                    if self.opsd_full_vocab_jsd_enabled and opsd_enabled:
+                        # For full-vocab JSD, actor worker needs teacher-context tensors.
+                        batch.batch["teacher_input_ids"] = ref_input_batch.batch["input_ids"]
+                        batch.batch["teacher_attention_mask"] = ref_input_batch.batch[
+                            "attention_mask"
+                        ]
+                        batch.batch["teacher_position_ids"] = ref_input_batch.batch[
+                            "position_ids"
+                        ]
+
+                    # Keep existing sampled-token ref_log_prob path for non-JSD or mixed runs.
+                    if not self.opsd_full_vocab_jsd_enabled:
+                        if self.opsd_shared_teacher and opsd_enabled:
+                            shared_ref_log_prob = self.actor_rollout_wg.compute_log_prob(
+                                ref_input_batch
+                            )
+                            ref_log_prob = DataProto.from_dict(
+                                tensors={
+                                    "ref_log_prob": shared_ref_log_prob.batch[
+                                        "old_log_probs"
+                                    ]
+                                }
+                            )
+                        elif not self.ref_in_actor:
+                            ref_log_prob = self.ref_policy_wg.compute_ref_log_prob(
+                                ref_input_batch
+                            )
+                        else:
+                            ref_log_prob = self.actor_rollout_wg.compute_ref_log_prob(
+                                ref_input_batch
+                            )
+                        batch = batch.union(ref_log_prob)
 
             # 8. Compute values if using critic
             if self.use_critic:
@@ -1233,7 +1400,7 @@ class PPOTrainingServerBackend:
                 # Disable RL reward: zero out base advantages so only KL drives the update.
                 # Requires use_kl_in_advantage=True; effective formula: A_final = -α * KL
                 if self.config.algorithm.get("disable_rl_reward", False):
-                    assert self.config.algorithm.get("use_kl_in_advantage", False) 
+                    assert self.config.algorithm.get("use_kl_in_advantage", False) or self.opsd_full_vocab_jsd_enabled
                     # requires use_kl_in_advantage=True when disable_rl_reward=True
                     batch.batch["advantages"] = torch.zeros_like(batch.batch["advantages"])
                     batch.batch["returns"] = torch.zeros_like(batch.batch["returns"])
@@ -1241,7 +1408,7 @@ class PPOTrainingServerBackend:
                 # On-policy distillation: add per-token KL penalty to advantage.
                 # A_final = A_base - α * (log π_student - log π_teacher)
                 # Works with any adv_estimator (grpo, gae, grpo_per_step, …).
-                if self.config.algorithm.get("use_kl_in_advantage", False):
+                if self.config.algorithm.get("use_kl_in_advantage", False) and not self.opsd_full_vocab_jsd_enabled:
                     kl_coef = self.config.algorithm.kl_ctrl.kl_coef
                     batch = incorporate_kl_penalty_in_advantage(batch, kl_coef)
                     kl = (
@@ -1266,6 +1433,21 @@ class PPOTrainingServerBackend:
                     batch.meta_info["multi_turn"] = (
                         self.config.actor_rollout_ref.rollout.multi_turn.enable
                     )
+                    if self.opsd_full_vocab_jsd_enabled and self.opsd_enabled:
+                        batch.meta_info["opsd_full_vocab_jsd_enable"] = True
+                        batch.meta_info["opsd_jsd_beta"] = self.opsd_jsd_beta
+                        batch.meta_info["opsd_jsd_coef"] = self.opsd_jsd_coef
+                        batch.meta_info["opsd_distill_mode"] = self.opsd_distill_mode
+                        batch.meta_info["opsd_topk"] = self.opsd_topk
+                        batch.meta_info["opsd_jsd_vocab_chunk_size"] = (
+                            self.opsd_jsd_vocab_chunk_size
+                        )
+                        batch.meta_info["opsd_jsd_token_chunk_size"] = (
+                            self.opsd_jsd_token_chunk_size
+                        )
+                        batch.meta_info["opsd_jsd_teacher_logits_cpu_offload"] = (
+                            self.opsd_jsd_teacher_logits_cpu_offload
+                        )
                     actor_output = self.actor_rollout_wg.update_actor(batch)
                     actor_output_metrics = reduce_metrics(
                         actor_output.meta_info["metrics"]
@@ -1347,6 +1529,9 @@ class PPOTrainingServerBackend:
                         continue
 
             logger.info(f"Training step {self.global_steps} completed successfully")
+            metrics = _sanitize_metrics_for_json(
+                metrics, context=f"train_step_{self.global_steps}"
+            )
 
             return {
                 "status": "success",
@@ -1422,10 +1607,18 @@ class PPOTrainingServerBackend:
 
     def _prepare_val_batch(self, batch: DataProto) -> DataProto:
         gen_batch = self._prepare_generation_batch(batch)
+        val_kwargs = self.config.actor_rollout_ref.rollout.val_kwargs
         gen_batch.meta_info["validate"] = True
-        gen_batch.meta_info["do_sample"] = (
-            self.config.actor_rollout_ref.rollout.val_kwargs.do_sample
-        )
+        gen_batch.meta_info["do_sample"] = val_kwargs.do_sample
+        val_temperature = val_kwargs.get("temperature", None)
+        if val_temperature is not None:
+            gen_batch.meta_info["temperature"] = float(val_temperature)
+        val_max_new_tokens = self.val_max_new_tokens
+        if val_max_new_tokens is None:
+            # Backward compatibility for configs that (incorrectly) put this field in val_kwargs.
+            val_max_new_tokens = val_kwargs.get("max_new_tokens", None)
+        if val_max_new_tokens is not None:
+            gen_batch.meta_info["max_new_tokens"] = int(val_max_new_tokens)
         gen_batch.meta_info["recompute_log_prob"] = False
         gen_batch.meta_info["global_steps"] = self.global_steps
         return gen_batch
@@ -1651,6 +1844,62 @@ class PPOTrainingServerBackend:
                 batch.non_tensor_batch = expanded_non_tensor
             batch = batch.union(gen_batch_output)
 
+            # 7.1 Response-format diagnostics for math validation.
+            # Useful when score is unexpectedly low due to answer format mismatch.
+            diagnostic_metrics = {}
+            if (
+                batch.batch is not None
+                and "responses" in batch.batch.keys()
+                and "prompts" in batch.batch.keys()
+                and "attention_mask" in batch.batch.keys()
+            ):
+                boxed_count = 0
+                answer_tag_count = 0
+                valid_count = 0
+                response_lens = []
+                for i in range(len(batch)):
+                    data_item = batch[i]
+                    prompt_ids = data_item.batch["prompts"]
+                    prompt_length = prompt_ids.shape[-1]
+                    valid_response_length = int(
+                        data_item.batch["attention_mask"][prompt_length:].sum().item()
+                    )
+                    if valid_response_length <= 0:
+                        continue
+                    response_ids = data_item.batch["responses"][:valid_response_length]
+                    response_str = self.tokenizer.decode(
+                        response_ids, skip_special_tokens=True
+                    )
+                    valid_count += 1
+                    response_lens.append(valid_response_length)
+                    if "\\boxed{" in response_str:
+                        boxed_count += 1
+                    if "answer:" in response_str.lower():
+                        answer_tag_count += 1
+
+                if valid_count > 0:
+                    diagnostic_metrics["val/response_boxed_rate"] = boxed_count / float(
+                        valid_count
+                    )
+                    diagnostic_metrics["val/response_answer_tag_rate"] = answer_tag_count / float(
+                        valid_count
+                    )
+                    diagnostic_metrics["val/gen_len_mean"] = float(np.mean(response_lens))
+                    diagnostic_metrics["val/gen_len_min"] = float(np.min(response_lens))
+                    diagnostic_metrics["val/gen_len_max"] = float(np.max(response_lens))
+
+            if "data_source" in batch.non_tensor_batch:
+                data_sources = list(batch.non_tensor_batch["data_source"])
+                strict_sources = {
+                    "DigitalLearningGmbH/MATH-lighteval",
+                    "lighteval/MATH",
+                    "HuggingFaceH4/MATH-500",
+                }
+                strict_count = sum(1 for ds in data_sources if ds in strict_sources)
+                diagnostic_metrics["val/strict_math_data_source_rate"] = strict_count / float(
+                    max(1, len(data_sources))
+                )
+
             # 7. Compute reward using validation reward function
             if self.val_reward_fn is None:
                 raise ValueError("val_reward_fn must be provided for validation.")
@@ -1666,6 +1915,7 @@ class PPOTrainingServerBackend:
                 "val/max_score": float(np.max(scores)),
                 "val/min_score": float(np.min(scores)),
             }
+            metrics.update(diagnostic_metrics)
 
             # pass@k uses GRPO-style uid grouping and best@k aggregation.
             val_n = self.config.actor_rollout_ref.rollout.val_kwargs.n
@@ -1751,6 +2001,9 @@ class PPOTrainingServerBackend:
                 )
 
             logger.info(f"Validation completed: {metrics}")
+            metrics = _sanitize_metrics_for_json(
+                metrics, context=f"validation_step_{self.global_steps}"
+            )
 
             return {
                 "status": "success",

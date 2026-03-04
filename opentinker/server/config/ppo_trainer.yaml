@@ -15,6 +15,7 @@ ray:
 wandb_key: ""
 nccl_p2p_disable: "1"
 enable_agent_loop: True
+enable_thinking: False
 tool_config_path: null
 job_id: null # Set by scheduler for resource tracking
 # model_path: /workspace/verl/HuggingFace-Download-Accelerator/hf_hub/models--Qwen--Qwen2.5-3B

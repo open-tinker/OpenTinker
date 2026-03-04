@@ -149,8 +149,18 @@ class MathGame(AbstractGame):
 
             # Handle both dict and scalar return values
             if isinstance(score, dict):
-                return float(score.get("score", 0.0))
-            return float(score)
+                scalar_score = float(score.get("score", 0.0))
+            else:
+                scalar_score = float(score)
+
+            # Strict MATH scorer may return 0 if model did not output \boxed{}.
+            # For paper benchmarks, allow a conservative fallback parser that checks
+            # explicit final-answer patterns and last-line numeric/latex answers.
+            if scalar_score <= 0.0:
+                loose = self._loose_match(solution_str)
+                if loose > 0.0:
+                    return loose
+            return scalar_score
 
         except Exception as e:
             # Fallback: simple string matching
@@ -158,6 +168,48 @@ class MathGame(AbstractGame):
 
             logging.warning(f"Reward computation failed, using fallback: {e}")
             return self._simple_match(solution_str)
+
+    def _extract_answer_candidate(self, solution_str: str) -> Optional[str]:
+        """Extract likely final answer from model output for loose validation."""
+        try:
+            from verl.utils.reward_score.math_reward import last_boxed_only_string, remove_boxed
+
+            boxed = last_boxed_only_string(solution_str)
+            if boxed is not None:
+                return remove_boxed(boxed).strip()
+        except Exception:
+            pass
+
+        answer_matches = re.findall(
+            r"(?is)(?:final\s+answer|answer)\s*[:：]\s*([^\n\r]+)",
+            solution_str,
+        )
+        if answer_matches:
+            return answer_matches[-1].strip().strip("$").strip(" .。!！")
+
+        lines = [ln.strip() for ln in solution_str.splitlines() if ln.strip()]
+        if not lines:
+            return None
+        tail = lines[-1]
+        tail = re.sub(r"^[-*`> ]+", "", tail)
+        if "=" in tail and len(tail.split("=")[0].strip()) <= 10:
+            tail = tail.split("=")[-1]
+        tail = tail.strip().strip("$").strip(" .。!！")
+        return tail or None
+
+    def _loose_match(self, solution_str: str) -> float:
+        """Loose equivalence check to mitigate answer-format mismatch."""
+        if self.ground_truth is None:
+            return 0.0
+        candidate = self._extract_answer_candidate(solution_str)
+        if not candidate:
+            return 0.0
+        try:
+            from verl.utils.reward_score.math_reward import is_equiv
+
+            return self.REWARD_CORRECT if is_equiv(candidate, str(self.ground_truth)) else self.REWARD_INCORRECT
+        except Exception:
+            return self.REWARD_CORRECT if str(self.ground_truth).strip() == candidate.strip() else self.REWARD_INCORRECT
 
     def _simple_match(self, solution_str: str) -> float:
         """Simple fallback: check if ground_truth appears in solution."""

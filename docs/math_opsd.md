@@ -13,6 +13,8 @@ When `algorithm.opsd.enable=true`, the server computes `ref_log_prob` using a pr
 - Student rollout and `old_log_probs` stay unchanged
 - The update still uses the existing KL-in-advantage path
 - Teacher parameter mode is controlled by `algorithm.opsd.teacher_mode` (`fixed` or `shared`)
+- Optional full-vocab objective can be enabled via
+  `algorithm.opsd.full_vocab_jsd.enable=true` (JSD over full token distributions)
 
 When `algorithm.opsd.enable=false`, behavior is unchanged from existing distill/RL logic.
 
@@ -135,3 +137,4 @@ In addition to existing metrics, OPSD logs:
 
 You do not need to manually duplicate validation data `k` times. Validation auto-repeats each sample by `val_n`.
 Validation sampling temperature can be set via `val_temperature`. This is also effective when `val_n = 1` (sampling is enabled when `val_temperature > 0`).
+Validation generation length cap can be set via `val_max_new_tokens` (null means reuse `max_new_tokens`).

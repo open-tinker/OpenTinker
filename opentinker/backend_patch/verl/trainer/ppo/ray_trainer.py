@@ -399,11 +399,17 @@ class RayPPOTrainer:
             experiment_name=self.config.trainer.experiment_name,
         )
 
+        opsd_cfg = self.config.algorithm.get("opsd", {})
+        opsd_full_vocab_cfg = opsd_cfg.get("full_vocab_jsd", {})
+        self.opsd_full_vocab_jsd_enabled = bool(opsd_full_vocab_cfg.get("enable", False))
+
         # if ref_in_actor is True, the reference policy will be actor without lora applied
         self.ref_in_actor = (
             config.actor_rollout_ref.model.get("lora_rank", 0) > 0
             or config.actor_rollout_ref.model.get("lora_adapter_path") is not None
         )
+        if self.opsd_full_vocab_jsd_enabled:
+            self.ref_in_actor = True
 
         # define in-reward KL control
         # kl loss control currently not suppoorted
@@ -873,10 +879,15 @@ class RayPPOTrainer:
             resource_pool = self.resource_pool_manager.get_resource_pool(
                 Role.ActorRollout
             )
+            actor_role = (
+                str(Role.ActorRolloutRef)
+                if self.opsd_full_vocab_jsd_enabled
+                else str(Role.ActorRollout)
+            )
             actor_rollout_cls = RayClassWithInitArgs(
                 cls=self.role_worker_mapping[Role.ActorRollout],
                 config=self.config.actor_rollout_ref,
-                role=str(Role.ActorRollout),
+                role=actor_role,
             )
             self.resource_pool_to_cls[resource_pool][str(Role.ActorRollout)] = (
                 actor_rollout_cls

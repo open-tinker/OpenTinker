@@ -1049,6 +1049,22 @@ class JobSchedulerActor:
             f"enable_agent_loop={job.config['enable_agent_loop']}",
         ]
 
+        enable_thinking = job.config.get("enable_thinking", None)
+        if enable_thinking is not None:
+            if isinstance(enable_thinking, str):
+                enable_thinking = enable_thinking.strip().lower() in (
+                    "1",
+                    "true",
+                    "yes",
+                    "on",
+                )
+            else:
+                enable_thinking = bool(enable_thinking)
+            cmd.append(f"enable_thinking={str(enable_thinking).lower()}")
+            logger.info(
+                f"Job {job.job_id}: ✓ Forwarding enable_thinking={enable_thinking}"
+            )
+
         if job.config.get("wandb_key"):
             cmd.append(f"wandb_key={job.config['wandb_key']}")
 

@@ -26,11 +26,14 @@ num_epochs: 10
 num_steps: null
 save_freq: 1000
 test_freq: 10
+val_before_train: true
 
 # Validation parameters
 val_batch_size: 100
 val_n: 8 # k for pass@k during validation (auto-repeat, no manual dataset duplication needed)
 val_temperature: 1.2 # validation sampling temperature (also effective when val_n = 1 if > 0)
+# null -> fallback to max_new_tokens for validation generation length.
+val_max_new_tokens: null
 
 # Generation parameters
 temperature: 1.0
@@ -64,6 +67,21 @@ algorithm:
     # - fixed: teacher is a frozen reference model (default)
     # - shared: teacher shares current student parameters (OPSD teacher-context only)
     teacher_mode: "fixed"
+
+    # OPSD distillation objective.
+    # - full_vocab_jsd: JSD over full token distributions
+    # - topk_reverse_kl_tail: reverse-KL over teacher top-K + tail mass
+    full_vocab_jsd:
+      enable: false
+      # Options: "full_vocab_jsd" | "topk_reverse_kl_tail"
+      distill_mode: "topk_reverse_kl_tail"
+      # Teacher top-K bins per position when using topk_reverse_kl_tail.
+      topk: 32
+      beta: 0.5
+      coef: 1.0
+      vocab_chunk_size: 4096
+      token_chunk_size: 0
+      teacher_logits_cpu_offload: true
 
 # Legacy scheduler compatibility: mirror estimator at top-level.
 # New code reads algorithm.adv_estimator first-class; this keeps old scheduler versions working too.

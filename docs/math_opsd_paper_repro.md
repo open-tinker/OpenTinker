@@ -1,64 +1,49 @@
-# OPSD 论文复现实操（2601.18734）
+# OPSD 复现实验偏差诊断（2601.18734，4卡，全参数，当前看 `pass@4`）
 
-本文档给出 OpenTinker 内的最小复现路径，并明确当前实现与论文主设定的差异。
+## 1. 当前默认口径（本仓库）
 
-## 1. 你当前 OPSD 与论文的关键差距
+`opentinker/client/client_config/math_opsd_paper_param.yaml` 当前默认值：
 
-1. 训练目标不同（最关键）  
-当前代码主路径是 sampled-token 的 `KL-in-advantage`（策略梯度形态）。  
-论文主结果默认使用 **full-vocabulary logit distillation + JSD(beta=0.5)**（Eq.6/7）。
+- 全参数训练：`lora.lora_rank=0`
+- 验证口径：`val_n=4`（`pass@4`）
+- 生成长度：`max_new_tokens=2048`、`val_max_new_tokens=2048`
+- 采样策略：`temperature=1.2`、`top_p=0.95`
+- 系统开关：`enable_agent_loop=true`、`enable_thinking=false`
+- 蒸馏目标：`distill_mode=topk_reverse_kl_tail`、`topk=32`
 
-2. teacher 参数模式  
-论文强调 teacher 固定为初始策略更稳定。  
-本仓库已改为默认 `teacher_mode=fixed`，并提供 paper 配置。
+注：`topk_reverse_kl_tail` 模式下，`beta` 参数不参与损失计算。
 
-3. 训练超参默认值  
-原默认配置和论文有偏差（如 rollout 数、生成长度、LR 调度、有效 batch 等）。  
-已新增 paper 配置文件对齐常用设定。
+其中：
 
-4. 数据与评测协议  
-论文使用 OpenThoughts math 子集（最多 30k）训练，AIME24/AIME25/HMMT25/AMO-Bench 评测，`average@16`。  
-仓库已提供对应数据转换脚本。
+- `enable_agent_loop` 已从客户端硬编码改为配置项（默认 `true`）。
+- `enable_thinking` 已改为可配置（默认 `false`，可显式开 `true`）。
 
-## 2. 本次改动（已完成）
-
-1. 对齐 teacher prompt 到论文 Figure 2 文案风格（`opentinker/server/opsd_utils.py`）。  
-2. `math_opsd_rl.py` 支持 `server_overrides` 合并，避免写死训练器底层参数。  
-3. 客户端显式下发 LoRA 配置（可确保全参数训练：`lora_rank=0`）。  
-4. 新增论文复现配置：`opentinker/client/client_config/math_opsd_paper_param.yaml`。  
-5. 清理 `http_training_server.py` 中冗余 debug 日志，简化训练主流程。
-
-## 3. 启动步骤
-
-### Step 0: 环境准备
-
-按仓库根目录 `README.md` 完成安装（OpenTinker + verl + 依赖）。
-
-### Step 1: 准备论文同分布数据（30k train + benchmark test）
-
-```bash
-python data/prepare_opsd_math_data.py \
-  --output_dir data/opsd_math \
-  --max_train_samples 30000 \
-  --seed 42
-```
-
-输出重点文件：
-
-- `data/opsd_math/train_openthoughts_math.parquet`
-- `data/opsd_math/test_merged.parquet`
-
-### Step 2: 启动 scheduler 与环境服务
+## 2. 基础启动（4卡）
 
 ```bash
 # terminal A
-bash opentinker/scripts/launch_scheduler.sh --scheduler-port 8780 --gpus "[0,1,2,3,4,5,6,7]"
+bash opentinker/scripts/launch_scheduler.sh --scheduler-port 8781 --gpus "[0,1,2,3]"
 
 # terminal B
-python opentinker/environment/math/math_server.py --port 8082
+python opentinker/environment/math/math_server.py --port 8083
 ```
 
-### Step 3: 启动 OPSD 训练（全参数、非 LoRA）
+```bash
+# terminal C
+python opentinker/client/math_opsd_rl.py \
+  --config-name math_opsd_paper_param.yaml \
+  tokenizer_path=Qwen/Qwen3-4B-Instruct-2507 \
+  data_path=data/opsd_math/train_openthoughts_math.parquet \
+  val_data_path=data/opsd_math/test_merged.parquet \
+  scheduler_url=http://localhost:8781 \
+  interaction.config.env_host=localhost \
+  interaction.config.env_port=8083 \
+  num_gpus=4
+```
+
+## 3. A/B 实验（每组 100 step）
+
+### A 组（旧口径对照：8192 + top_p=1.0）
 
 ```bash
 python opentinker/client/math_opsd_rl.py \
@@ -68,19 +53,92 @@ python opentinker/client/math_opsd_rl.py \
   val_data_path=data/opsd_math/test_merged.parquet \
   scheduler_url=http://localhost:8781 \
   interaction.config.env_host=localhost \
-  interaction.config.env_port=8083
+  interaction.config.env_port=8083 \
+  num_gpus=4 \
+  num_steps=100 \
+  max_new_tokens=8192 \
+  val_max_new_tokens=8192 \
+  top_p=1.0
 ```
 
-如果你不是 8 卡，把 `num_gpus` 和 `server_overrides.actor_rollout_ref.actor.*batch*` 适当改小。
+### B 组（对齐口径：2048 + top_p=0.95）
 
-## 4. 结果解读与“精准复现”说明
+```bash
+python opentinker/client/math_opsd_rl.py \
+  --config-name math_opsd_paper_param.yaml \
+  tokenizer_path=Qwen/Qwen3-4B-Instruct-2507 \
+  data_path=data/opsd_math/train_openthoughts_math.parquet \
+  val_data_path=data/opsd_math/test_merged.parquet \
+  scheduler_url=http://localhost:8781 \
+  interaction.config.env_host=localhost \
+  interaction.config.env_port=8083 \
+  num_gpus=4 \
+  num_steps=100 \
+  max_new_tokens=2048 \
+  val_max_new_tokens=2048 \
+  top_p=0.95
+```
 
-1. 上述流程已经对齐了论文的大部分可操作设定：  
-`fixed teacher`、`rollout_n=1`、`2k generation`、`temperature=1.2`、`30k train`、`average@16`、`全参数训练`。
+对比指标：
 
-2. 仍未与论文“完全等价”的点：  
-当前主训练目标仍是 sampled-token KL 形态，不是 full-vocab JSD 主目标。  
-这会影响你是否能完全复现论文主表里的绝对数值。
+- `val/pass_at_4`
+- `val/mean_score`
+- `distill/full_vocab_jsd_loss`
+- `response_length/clip_ratio`
 
-3. 若要进一步逼近论文主结果：  
-需要在 `opentinker/backend_patch/verl` 里补一版 full-vocab teacher-student divergence 的 actor 侧 loss（避免改 `verl/` 原目录）。
+## 4. Agent Loop / Thinking A/B
+
+### C1（默认）：Agent Loop on，Thinking off
+
+```bash
+# 在第 2 节基础命令末尾追加：
+enable_agent_loop=true enable_thinking=false
+```
+
+### C2：Agent Loop on，Thinking on
+
+```bash
+# 在第 2 节基础命令末尾追加：
+enable_agent_loop=true enable_thinking=true
+```
+
+### C3：Agent Loop off（关键对照）
+
+```bash
+# 在第 2 节基础命令末尾追加：
+enable_agent_loop=false
+```
+
+## 5. 统计稳定性测试（同 checkpoint 连续 3 次 validation）
+
+建议固定同一 checkpoint，重复跑 3 次仅验证：
+
+```bash
+CKPT_PATH=/abs/path/to/ckpt
+for i in 1 2 3; do
+  python opentinker/client/math_opsd_rl.py \
+    --config-name math_opsd_paper_param.yaml \
+    tokenizer_path=Qwen/Qwen3-4B-Instruct-2507 \
+    data_path=data/opsd_math/train_openthoughts_math.parquet \
+    val_data_path=data/opsd_math/test_merged.parquet \
+    scheduler_url=http://localhost:8781 \
+    interaction.config.env_host=localhost \
+    interaction.config.env_port=8083 \
+    num_gpus=4 \
+    num_steps=0 \
+    val_before_train=true \
+    server_overrides.trainer.resume_mode=resume_path \
+    server_overrides.trainer.resume_from_path=$CKPT_PATH \
+    experiment_name=math_opsd_val_repeat_${i}
+done
+```
+
+若 `pass@4` 三次最大差值 `> 0.02`，先判为高噪声口径，不直接下“性能退化”结论。
+
+## 6. 结论模板（按可归因性）
+
+| 类别 | run-id | 关键设置 | `val/pass@4` | `val/mean_score` | `jsd_loss` | 结论 |
+|---|---|---|---:|---:|---:|---|
+| 参数口径问题 |  |  |  |  |  |  |
+| 训练框架行为问题 |  |  |  |  |  |  |
+| 真实性能退化 |  |  |  |  |  |  |

@@ -26,18 +26,23 @@ batch_size: 32
 num_workers: 0
 num_epochs: null
 num_steps: 1000
-save_freq: 200
-test_freq: 50
+save_freq: 2000
+test_freq: 20
+val_before_train: true
+enable_agent_loop: true
+enable_thinking: false
 
 # Validation parameters
 val_batch_size: 124
-val_n: 16
+val_n: 4
 val_temperature: 1.2
+# Use a dedicated validation cap if needed; null means reuse max_new_tokens.
+val_max_new_tokens: 8194
 
 # Generation parameters
 temperature: 1.2
-top_p: 1.0
-max_new_tokens: 2048
+top_p: 0.95
+max_new_tokens: 8194
 max_prompt_tokens: 4096
 
 # Rollout sampling count per prompt
@@ -46,12 +51,23 @@ rollout_n: 1
 # Algorithm settings
 algorithm:
   adv_estimator: "grpo"
-  use_kl_in_advantage: true
+  use_kl_in_advantage: false
   disable_rl_reward: true
   kl_penalty_coef: 0.1
   opsd:
     enable: true
     teacher_mode: "fixed"
+    full_vocab_jsd:
+      enable: true
+      # Options: "full_vocab_jsd" | "topk_reverse_kl_tail"
+      distill_mode: "topk_reverse_kl_tail"
+      # Teacher top-K bins per position when using topk_reverse_kl_tail.
+      topk: 50
+      beta: 0.5
+      coef: 1.0
+      vocab_chunk_size: 1024
+      token_chunk_size: 0
+      teacher_logits_cpu_offload: true
 
 # Legacy scheduler compatibility
 adv_estimator: ${algorithm.adv_estimator}
@@ -76,7 +92,7 @@ server_overrides:
       response_length: ${max_new_tokens}
     actor:
       ppo_mini_batch_size: 32
-      ppo_micro_batch_size_per_gpu: 1
+      ppo_micro_batch_size_per_gpu: 4
       ppo_epochs: 1
       optim:
         lr: 2.0e-5
@@ -96,7 +112,7 @@ interaction:
 multi_turn:
   max_user_turns: 0
   max_assistant_turns: 1
-  max_tokens_per_turn: 4096
+  max_tokens_per_turn: 8192
   weave_project: null
   experiment_name: "math_opsd_interaction"
 

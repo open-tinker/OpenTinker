@@ -54,7 +54,7 @@ def main(cfg):
         cfg.actor_rollout_ref.model.use_remove_padding = True
         cfg.actor_rollout_ref.model.enable_gradient_checkpointing = True
         cfg.actor_rollout_ref.actor.ppo_mini_batch_size = 16
-        cfg.actor_rollout_ref.actor.use_dynamic_bsz = True
+        cfg.actor_rollout_ref.actor.use_dynamic_bsz = False
         cfg.actor_rollout_ref.actor.fsdp_config.param_offload = False
         cfg.actor_rollout_ref.actor.fsdp_config.optimizer_offload = False
 
@@ -62,9 +62,9 @@ def main(cfg):
         cfg.actor_rollout_ref.actor.use_kl_loss = False  # False for PPO, True for GRPO
         cfg.algorithm.use_kl_in_reward = True  # True for PPO, False for GRPO
 
-        cfg.actor_rollout_ref.rollout.tensor_model_parallel_size = 2
+        cfg.actor_rollout_ref.rollout.tensor_model_parallel_size = 4
         cfg.actor_rollout_ref.rollout.name = "vllm"
-        cfg.actor_rollout_ref.rollout.gpu_memory_utilization = 0.6
+        cfg.actor_rollout_ref.rollout.gpu_memory_utilization = 0.8
 
         # GRPO/GRPO-per-step 特定配置
         # grpo_per_step uses the same training framework as grpo, just with different advantage estimation
@@ -118,7 +118,7 @@ def main(cfg):
         cfg.trainer.project_name = "OpenTinker"
         cfg.trainer.experiment_name = "qwen2.5-3b"
         cfg.trainer.n_gpus_per_node = 4
-        cfg.trainer.val_before_train = True
+        cfg.trainer.val_before_train = False
         cfg.trainer.nnodes = 1
         cfg.trainer.save_freq = 500
         cfg.trainer.test_freq = 500
@@ -192,13 +192,14 @@ def main(cfg):
             cfg.actor_rollout_ref.rollout.agent.agent_loop_config_path = (
                 "opentinker/server/agent.yaml"
             )
-            cfg.actor_rollout_ref.rollout.agent.num_workers = 8
+            cfg.actor_rollout_ref.rollout.agent.num_workers = 4
             cfg.data.return_raw_chat = True  # Required for agent_loop
 
-            # Disable thinking mode for agent_loop
+            # Keep default behavior (False) unless explicitly enabled by config.
+            enable_thinking = bool(cfg.get("enable_thinking", False))
             if not hasattr(cfg.data, "apply_chat_template_kwargs"):
                 cfg.data.apply_chat_template_kwargs = {}
-            cfg.data.apply_chat_template_kwargs.enable_thinking = False
+            cfg.data.apply_chat_template_kwargs.enable_thinking = enable_thinking
 
         logger.info(
             "✓ Agent loop configuration applied (Sandbox will be created after Ray init)"
@@ -206,6 +207,9 @@ def main(cfg):
         logger.info(f"  - Rollout mode: {cfg.actor_rollout_ref.rollout.mode}")
         logger.info(
             f"  - Multi-turn enabled: {cfg.actor_rollout_ref.rollout.multi_turn.enable}"
+        )
+        logger.info(
+            f"  - Thinking enabled: {cfg.data.apply_chat_template_kwargs.enable_thinking}"
         )
         logger.info(
             f"  - Default agent loop: {cfg.actor_rollout_ref.rollout.agent.default_agent_loop}"

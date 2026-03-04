@@ -14,8 +14,8 @@ kill -9 $(lsof -t -i:8781)
 bash opentinker/scripts/launch_scheduler.sh --scheduler-port 8781 --gpus "[6,7,8,9]"
 python opentinker/environment/math/math_server.py --port 8083
 
-bash opentinker/scripts/launch_scheduler.sh --scheduler-port 8780 --gpus "[0,1,2,3]"
-python opentinker/environment/math/math_server.py --port 8082
+bash opentinker/scripts/launch_scheduler.sh --scheduler-port 8781 --gpus "[0,1,2,3]"
+python opentinker/environment/math/math_server.py --port 8083
 
 
 # paper-like OPSD (full-parameter, no LoRA)
@@ -63,3 +63,8 @@ python opentinker/client/math_rl.py \
     scheduler_url=http://localhost:8781 \
     interaction.config.env_port=8083 \
     interaction.config.env_host=localhost
+
+
+git push origin on-policy-distill-feb20:paper_repri
+
+

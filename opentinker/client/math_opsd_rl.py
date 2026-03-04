@@ -27,17 +27,21 @@ def main(args):
     print(f"  kl_penalty_coef        : {algo.get('kl_penalty_coef', 0.1)}")
     print(f"  algorithm.opsd.enable  : {algo.get('opsd', {}).get('enable', False)}")
     print(f"  algorithm.opsd.teacher_mode : {algo.get('opsd', {}).get('teacher_mode', 'fixed')}")
+    print(f"  algorithm.opsd.full_vocab_jsd.enable : {algo.get('opsd', {}).get('full_vocab_jsd', {}).get('enable', False)}")
+    print(f"  val_before_train      : {args.get('val_before_train', True)}")
     print(f"  teacher_model_path     : {args.get('teacher_model_path', None)}")
     print(f"  lora_rank              : {args.get('lora', {}).get('lora_rank', 0)}")
+    print(f"  enable_agent_loop      : {args.get('enable_agent_loop', True)}")
     print("=" * 60)
 
+    enable_agent_loop = bool(args.get("enable_agent_loop", True))
     scheduler_client = SchedulerClient(
         scheduler_url=args.get("scheduler_url", "http://localhost:8780"),
         api_key=args.get("scheduler_api_key"),
     )
     job_result = scheduler_client.submit_job(
         config=OmegaConf.to_container(args, resolve=True),
-        enable_agent_loop=True,
+        enable_agent_loop=enable_agent_loop,
         wandb_key=args.get("wandb_key"),
         num_gpus=args.get("num_gpus"),
     )
@@ -85,6 +89,15 @@ def main(args):
             if key in lora_cfg:
                 model_cfg[key] = lora_cfg[key]
 
+    opsd_cfg = algo.get("opsd", {})
+    opsd_full_vocab_jsd_cfg = {}
+    if hasattr(opsd_cfg, "full_vocab_jsd"):
+        opsd_full_vocab_jsd_cfg = OmegaConf.to_container(
+            opsd_cfg.full_vocab_jsd, resolve=True
+        )
+    elif isinstance(opsd_cfg, dict) and "full_vocab_jsd" in opsd_cfg:
+        opsd_full_vocab_jsd_cfg = dict(opsd_cfg["full_vocab_jsd"])
+
     server_cfg = OmegaConf.create(
         {
             "data": {
@@ -94,7 +107,7 @@ def main(args):
             "actor_rollout_ref": {
                 "model": model_cfg,
                 "rollout": {
-                    "tensor_model_parallel_size": 2 if args.num_gpus > 1 else 1,
+                    "tensor_model_parallel_size": args.num_gpus if args.num_gpus > 1 else 1,
                     "n": int(args.rollout_n),
                 },
             },
@@ -109,10 +122,9 @@ def main(args):
                     "kl_coef": float(algo.get("kl_penalty_coef", 0.1)),
                 },
                 "opsd": {
-                    "enable": bool(algo.get("opsd", {}).get("enable", False)),
-                    "teacher_mode": str(
-                        algo.get("opsd", {}).get("teacher_mode", "fixed")
-                    ),
+                    "enable": bool(opsd_cfg.get("enable", False)),
+                    "teacher_mode": str(opsd_cfg.get("teacher_mode", "fixed")),
+                    "full_vocab_jsd": opsd_full_vocab_jsd_cfg,
                 },
             },
         }
@@ -136,6 +148,9 @@ def main(args):
 
     val_n = int(args.get("val_n", 1))
     val_temperature = float(args.get("val_temperature", 0.0))
+    val_max_new_tokens = args.get("val_max_new_tokens", None)
+    if val_max_new_tokens is not None:
+        val_max_new_tokens = int(val_max_new_tokens)
     val_do_sample = (val_n > 1) or (val_temperature > 0.0)
     with open_dict(server_cfg):
         server_cfg.actor_rollout_ref.rollout.val_kwargs = OmegaConf.create(
@@ -145,13 +160,14 @@ def main(args):
                 "temperature": val_temperature,
             }
         )
+        server_cfg.val_max_new_tokens = val_max_new_tokens
     if val_n > 1:
         print(
-            f"✓ Validation: pass@{val_n} mode (k=val_n, do_sample={val_do_sample}, temperature={val_temperature})"
+            f"✓ Validation: pass@{val_n} mode (k=val_n, do_sample={val_do_sample}, temperature={val_temperature}, max_new_tokens={val_max_new_tokens if val_max_new_tokens is not None else 'default'})"
         )
     else:
         print(
-            f"✓ Validation: n=1 mode (do_sample={val_do_sample}, temperature={val_temperature})"
+            f"✓ Validation: n=1 mode (do_sample={val_do_sample}, temperature={val_temperature}, max_new_tokens={val_max_new_tokens if val_max_new_tokens is not None else 'default'})"
         )
 
     if hasattr(args, "multi_turn") and args.multi_turn:
@@ -179,7 +195,7 @@ def main(args):
             save_freq=args.save_freq,
             test_freq=args.test_freq,
             verbose=True,
-            validate_before_training=True,
+            validate_before_training=bool(args.get("val_before_train", True)),
             game_stats_client=game_stats,
         )
         print(f"Training completed! Metrics: {final_metrics}")
