@@ -77,6 +77,10 @@ enable_prefix_caching: True
 # safetensors (for huge model, and set use_shm=True); dummy: randomly init model weight
 load_format: dummy
 
+# Whether to compute and store log_probs during rollout (required for turn-level temperature IS correction)
+# Set to True if using turn_level_temperature.enabled=True
+calculate_log_probs: true
+
 # [Will be deprecated, use log_prob_micro_batch_size_per_gpu] The batch size for one forward pass in the computation of log_prob. Global batch size.
 log_prob_micro_batch_size: null
 
@@ -189,9 +193,19 @@ multi_turn:
   # Number of repeat rollouts for each interaction
   num_repeat_rollouts: null
 
-# support logging rollout prob for debugging purpose
-# "Truncated importance sampling" requires rollout log probs, set to True when turning on Truncated importance sampling
-calculate_log_probs: False
+  # Turn-level temperature (WM-guided exploration)
+  # Adjusts sampling temperature per turn based on previous observation's WM uncertainty
+  turn_level_temperature:
+    _target_: opentinker.backend_patch.verl.workers.config.rollout.TurnLevelTemperatureConfig
+    enabled: false
+    base_temperature: 1.0
+    kappa: 0.3
+    min_temperature: 0.5
+    max_temperature: 1.5
+    ema_decay: 0.9
+    enable_is_correction: true
+    # Use accurate uncertainty (T=1 re-generation) vs heuristic (scaled log μ_T)
+    use_accurate_uncertainty: true
 
 # [Experimental] agent loop based rollout configs
 agent:

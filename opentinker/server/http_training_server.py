@@ -975,7 +975,7 @@ class PPOTrainingServerBackend:
                         batch, self.reward_fn
                     )
 
-            # 6. Compute old_log_probs
+            # 6. Compute old_log_probs (behavior policy log probabilities)
             with marked_timer("old_log_prob", timing_raw, color="blue"):
                 # ===== DEBUG LOGGING START =====
                 logger.info("=" * 80)
@@ -1007,11 +1007,76 @@ class PPOTrainingServerBackend:
                 logger.info("=" * 80)
                 # ===== DEBUG LOGGING END =====
 
-                old_log_prob = self.actor_rollout_wg.compute_log_prob(batch)
-                logger.info(
-                    f"DEBUG: old_log_prob keys: {list(old_log_prob.batch.keys())}"
+                # Check if turn-level temperature is enabled
+                # When enabled, rollout_log_probs already contains log μ_T (behavior policy log prob)
+                # which should be used directly as old_log_probs for correct IS correction
+                turn_temp_config = self.config.actor_rollout_ref.rollout.multi_turn.get(
+                    "turn_level_temperature", {}
                 )
-                entropys = old_log_prob.batch["entropys"]
+                turn_temp_enabled = turn_temp_config.get("enabled", False)
+                has_rollout_logprobs = "rollout_log_probs" in batch.batch
+                use_rollout_logprobs_as_old = turn_temp_enabled and has_rollout_logprobs
+
+                # CRITICAL: Warn if turn-level temp is enabled but rollout_log_probs not available
+                if turn_temp_enabled and not has_rollout_logprobs:
+                    logger.warning(
+                        "[TurnLevelTemp] WARNING: turn_level_temperature is enabled but rollout_log_probs "
+                        "is not in batch! This means calculate_log_probs=False in rollout config. "
+                        "Set actor_rollout_ref.rollout.calculate_log_probs=True for correct IS correction."
+                    )
+
+                # Log turn-level temperature statistics if available
+                has_token_temps = "token_temperatures" in batch.non_tensor_batch
+                if has_token_temps:
+                    token_temps_raw = batch.non_tensor_batch.get(
+                        "token_temperatures", None
+                    )
+                    if token_temps_raw is not None:
+                        all_temps = []
+                        for temps in token_temps_raw:
+                            if temps is not None and len(temps) > 0:
+                                all_temps.extend(temps)
+                        if all_temps:
+                            metrics["turn_temp/mean"] = np.mean(all_temps)
+                            metrics["turn_temp/std"] = (
+                                np.std(all_temps) if len(all_temps) > 1 else 0.0
+                            )
+                            metrics["turn_temp/min"] = np.min(all_temps)
+                            metrics["turn_temp/max"] = np.max(all_temps)
+                            adjusted_count = sum(
+                                1 for t in all_temps if abs(t - 1.0) > 0.01
+                            )
+                            metrics["turn_temp/adjusted_ratio"] = adjusted_count / len(
+                                all_temps
+                            )
+                            logger.info(
+                                f"[TurnLevelTemp] Batch stats: mean={metrics['turn_temp/mean']:.3f}, "
+                                f"range=[{metrics['turn_temp/min']:.3f}, {metrics['turn_temp/max']:.3f}], "
+                                f"adjusted_ratio={metrics['turn_temp/adjusted_ratio']:.2%}"
+                            )
+
+                # Also log turn-level uncertainties if available
+                if "turn_uncertainties" in batch.non_tensor_batch:
+                    turn_u_raw = batch.non_tensor_batch.get("turn_uncertainties", None)
+                    if turn_u_raw is not None:
+                        all_u = []
+                        for u_list in turn_u_raw:
+                            if u_list is not None and len(u_list) > 0:
+                                all_u.extend(u_list)
+                        if all_u:
+                            metrics["turn_temp/uncertainty_mean"] = np.mean(all_u)
+                            metrics["turn_temp/uncertainty_std"] = (
+                                np.std(all_u) if len(all_u) > 1 else 0.0
+                            )
+
+                # Always compute log_prob with T=1 to get entropy for entropy bonus
+                # (entropy should be computed on the learned policy, not the behavior policy)
+                actor_log_prob = self.actor_rollout_wg.compute_log_prob(batch)
+                logger.info(
+                    f"DEBUG: actor_log_prob keys: {list(actor_log_prob.batch.keys())}"
+                )
+
+                entropys = actor_log_prob.batch["entropys"]
                 response_masks = batch.batch["response_mask"]
 
                 from verl.trainer.ppo.core_algos import agg_loss
@@ -1039,10 +1104,42 @@ class PPOTrainingServerBackend:
                 # ===== DEBUG LOGGING END =====
 
                 metrics.update(old_log_prob_metrics)
-                old_log_prob.batch.pop("entropys")
-                batch = batch.union(old_log_prob)
+                actor_log_prob.batch.pop("entropys")
+
+                # CRITICAL FIX: Use correct behavior policy log_prob for IS correction
+                # When turn-level temperature is enabled:
+                #   - rollout_log_probs = log μ_T = log softmax(z/T) (from sglang/vLLM during sampling)
+                #   - This is the TRUE behavior policy log_prob and should be used as old_log_probs
+                #   - ratio = π_θ_new / μ_T = exp(log π_θ_new - log μ_T)
+                # When turn-level temperature is NOT enabled (T=1 everywhere):
+                #   - Use actor_log_prob["old_log_probs"] as before (both are log π)
+                if use_rollout_logprobs_as_old:
+                    logger.info(
+                        "[TurnLevelTemp] Using rollout_log_probs as old_log_probs for correct IS correction"
+                    )
+                    # rollout_log_probs is already log μ_T from the behavior policy
+                    batch.batch["old_log_probs"] = batch.batch["rollout_log_probs"]
+
+                    # Log the difference between actor (T=1) and rollout (T≠1) log_probs
+                    actor_lp = actor_log_prob.batch["old_log_probs"]
+                    rollout_lp = batch.batch["rollout_log_probs"]
+                    diff = (actor_lp - rollout_lp).abs()
+                    masked_diff = diff * response_masks
+                    if response_masks.sum() > 0:
+                        mean_diff = masked_diff.sum() / response_masks.sum()
+                        max_diff = masked_diff.max()
+                        metrics["turn_temp/logprob_diff_mean"] = mean_diff.item()
+                        metrics["turn_temp/logprob_diff_max"] = max_diff.item()
+                        logger.info(
+                            f"[TurnLevelTemp] log_prob diff (actor vs rollout): "
+                            f"mean={mean_diff.item():.4f}, max={max_diff.item():.4f}"
+                        )
+                else:
+                    # Standard case: no temperature variation, actor log_prob = behavior log_prob
+                    batch = batch.union(actor_log_prob)
+
                 logger.info(
-                    f"DEBUG: batch keys after old_log_prob union: {list(batch.batch.keys())}"
+                    f"DEBUG: batch keys after old_log_prob processing: {list(batch.batch.keys())}"
                 )
 
                 # Calculate debug metrics for rollout vs actor log probs mismatch
@@ -1169,6 +1266,10 @@ class PPOTrainingServerBackend:
                 with marked_timer("update_actor", timing_raw, color="red"):
                     batch.meta_info["multi_turn"] = (
                         self.config.actor_rollout_ref.rollout.multi_turn.enable
+                    )
+                    # Required by dp_actor.update_policy
+                    batch.meta_info["temperature"] = (
+                        self.config.actor_rollout_ref.rollout.temperature
                     )
                     actor_output = self.actor_rollout_wg.update_actor(batch)
                     actor_output_metrics = reduce_metrics(

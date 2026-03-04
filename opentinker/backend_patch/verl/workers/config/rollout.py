@@ -22,6 +22,7 @@ from verl.utils.profiler import ProfilerConfig
 
 __all__ = [
     "SamplingConfig",
+    "TurnLevelTemperatureConfig",
     "MultiTurnConfig",
     "CustomAsyncServerConfig",
     "AgentLoopConfig",
@@ -41,6 +42,21 @@ class SamplingConfig(BaseConfig):
 
 
 @dataclass
+class TurnLevelTemperatureConfig(BaseConfig):
+    """Configuration for turn-level temperature (WM-guided exploration during rollout)."""
+
+    enabled: bool = False
+    base_temperature: float = 1.0
+    kappa: float = 0.3  # Temperature adjustment range
+    min_temperature: float = 0.5
+    max_temperature: float = 1.5
+    ema_decay: float = 0.9
+    enable_is_correction: bool = True
+    # Use accurate uncertainty (T=1 re-generation) vs heuristic (scaled log μ_T)
+    use_accurate_uncertainty: bool = True
+
+
+@dataclass
 class MultiTurnConfig(BaseConfig):
     _mutable_fields = {
         "max_assistant_turns",
@@ -48,6 +64,7 @@ class MultiTurnConfig(BaseConfig):
         "max_tokens_per_turn",
         "weave_project",
         "experiment_name",
+        "turn_level_temperature",
     }
 
     enable: bool = False
@@ -71,6 +88,11 @@ class MultiTurnConfig(BaseConfig):
     # Weave tracing (server-side)
     weave_project: Optional[str] = None
     experiment_name: Optional[str] = None
+
+    # Turn-level temperature for WM-guided exploration
+    turn_level_temperature: TurnLevelTemperatureConfig = field(
+        default_factory=TurnLevelTemperatureConfig
+    )
 
 
 @dataclass

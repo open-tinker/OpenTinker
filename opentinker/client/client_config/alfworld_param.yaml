@@ -75,6 +75,26 @@ multi_turn:
   weave_project: "zsqzz/alfworld-env-test"
   experiment_name: "alfworld_interaction"
 
+  # Turn-level Temperature (WM-guided exploration)
+  # Adjusts sampling temperature per turn based on previous observation's WM uncertainty
+  # High uncertainty -> higher temperature (more exploration)
+  # Low uncertainty -> lower temperature (more exploitation)
+  #
+  # IMPORTANT: Requires actor_rollout_ref.rollout.calculate_log_probs=True
+  # to ensure rollout_log_probs is saved for correct IS correction.
+  turn_level_temperature:
+    enabled: true # Set to true to enable dynamic temperature per turn
+    base_temperature: 1.0 # Base temperature when uncertainty is average
+    kappa: 0.5 # Sensitivity: T = T_base + kappa * tanh(normalized_uncertainty)
+    min_temperature: 0.5 # Minimum allowed temperature
+    max_temperature: 2.0 # Maximum allowed temperature
+    ema_decay: 0.9 # EMA decay for uncertainty normalization
+    # Uncertainty computation method:
+    # - true: Use accurate method (T=1 re-generation to get log π), SLOW - extra model call
+    # - false: Use heuristic (direct log μ_T), fast and works with vLLM
+    # NOTE: vLLM doesn't support the extra generate call, so use false with vLLM
+    use_accurate_uncertainty: false
+
 # Scheduler settings
 scheduler_url: "http://0.0.0.0:8780"
 scheduler_api_key: otk_98b8db24ccd64c92e1fdd9a232e209fa
@@ -88,20 +108,19 @@ actor:
   # 训练模型预测环境观察，提供 WM 不确定性信号
   use_world_model_loss: true
   world_model_loss_coef: 0.01 # 用小系数避免干扰 policy
-  
 
   # Turn-wise Dynamic Entropy Coefficient (WM-guided)
   # 根据每个 turn 的 WM uncertainty 调整 entropy bonus
   # 高 uncertainty turn -> β > per_turn_budget -> 更多探索
   # 低 uncertainty turn -> β < per_turn_budget -> 更稳定执行
   wm_dynamic_entropy:
-    enabled: true
+    enabled: false
     # Per-turn budget design:
     # β_t = per_turn_budget * (1 + fluctuation * tanh(γ * (u - baseline) / baseline))
     # - per_turn_budget: 每个 turn 的基础 entropy budget
     # - baseline: 动态计算 = 该 sample 内所有 turn 的 uncertainty 均值
     # - fluctuation: 浮动范围 (0.5 = ±50%)
     # - gamma: 敏感度 (越大对 uncertainty 差异越敏感)
-    per_turn_budget: 0.002  # 每个 turn 的基础 budget
-    fluctuation: 0.5        # ±50% 浮动 (beta 范围: [0.001, 0.003])
-    gamma: 1.0              # 敏感度
+    per_turn_budget: 0.002 # 每个 turn 的基础 budget
+    fluctuation: 0.5 # ±50% 浮动 (beta 范围: [0.001, 0.003])
+    gamma: 1.0 # 敏感度

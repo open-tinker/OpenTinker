@@ -1262,15 +1262,27 @@ class RayPPOTrainer:
         # beta_t = per_turn_budget * (1 + fluctuation * tanh(gamma * (u - baseline) / baseline))
         # This gives each turn a base budget, adjusted up/down by WM uncertainty
         per_turn_budget = get_config_value(wm_config, "per_turn_budget", 0.002)
-        baseline = get_config_value(wm_config, "baseline", 2.0)  # Expected "normal" uncertainty
         gamma = get_config_value(wm_config, "gamma", 1.0)  # Sensitivity
         fluctuation = get_config_value(wm_config, "fluctuation", 0.5)  # ±50% range
-        
+
+        # Sparse mode: only add entropy to turns with uncertainty significantly above baseline
+        sparse_mode = get_config_value(wm_config, "sparse_mode", False)
+        sparsity_threshold = get_config_value(
+            wm_config, "sparsity_threshold", 0.3
+        )  # 30% above baseline
+
+        print(f"[WM Dynamic Entropy] DEBUG: wm_config = {wm_config}")
+        print(
+            f"[WM Dynamic Entropy] DEBUG: per_turn_budget={per_turn_budget}, fluctuation={fluctuation}, sparse_mode={sparse_mode}, sparsity_threshold={sparsity_threshold}"
+        )
+
         # Legacy config support (fallback to old beta_0/beta_1 if per_turn_budget not set)
         beta_0 = get_config_value(wm_config, "beta_0", None)
         beta_1 = get_config_value(wm_config, "beta_1", None)
-        use_legacy_mode = beta_0 is not None and beta_1 is not None and per_turn_budget == 0.002
-        
+        use_legacy_mode = (
+            beta_0 is not None and beta_1 is not None and per_turn_budget == 0.002
+        )
+
         if beta_0 is None:
             beta_0 = base_entropy_coeff
         if beta_1 is None:
@@ -1303,8 +1315,7 @@ class RayPPOTrainer:
             )
             # Create uniform beta_token with per_turn_budget (neutral value)
             beta_token = (
-                torch.ones(batch_size, response_length, device=device)
-                * per_turn_budget
+                torch.ones(batch_size, response_length, device=device) * per_turn_budget
             )
             batch.batch["beta_token"] = beta_token
             metrics["wm_entropy/beta_token_mean"] = per_turn_budget
@@ -1411,31 +1422,43 @@ class RayPPOTrainer:
 
             if len(turn_uncertainties) >= 1:
                 valid_samples += 1
-                
+
                 # Compute DYNAMIC baseline = mean of all turn uncertainties in this sample
                 sample_uncertainties = [u for _, u in turn_uncertainties]
                 sample_baseline = np.mean(sample_uncertainties)
-                
+
                 for t, u in turn_uncertainties:
-                    # Per-turn budget with dynamic baseline adjustment
-                    # beta_t = per_turn_budget * (1 + fluctuation * tanh(gamma * (u - sample_baseline) / sample_baseline))
-                    # 
-                    # When u = sample_baseline: multiplier = 1, beta_t = per_turn_budget
-                    # When u > sample_baseline: multiplier > 1, beta_t > per_turn_budget (more exploration)
-                    # When u < sample_baseline: multiplier < 1, beta_t < per_turn_budget (less exploration)
-                    
+                    # Compute normalized difference from baseline
                     if sample_baseline > 1e-6:
                         normalized_diff = (u - sample_baseline) / sample_baseline
                     else:
                         normalized_diff = 0.0
-                    
-                    # Use tanh to smoothly bound the multiplier to [1-fluctuation, 1+fluctuation]
-                    multiplier = 1.0 + fluctuation * np.tanh(gamma * normalized_diff)
-                    beta_t = per_turn_budget * multiplier
-                    
-                    # Ensure beta_t is non-negative
-                    beta_t = max(0.0, beta_t)
-                    
+
+                    if sparse_mode:
+                        # Sparse mode: only add entropy to turns with uncertainty significantly above baseline
+                        # If normalized_diff > sparsity_threshold, add full per_turn_budget
+                        # Otherwise, add nothing (beta_t = 0)
+                        if normalized_diff > sparsity_threshold:
+                            beta_t = per_turn_budget
+                        else:
+                            beta_t = 0.0
+                    else:
+                        # Dense mode: Per-turn budget with dynamic baseline adjustment
+                        # beta_t = per_turn_budget * (1 + fluctuation * tanh(gamma * (u - sample_baseline) / sample_baseline))
+                        #
+                        # When u = sample_baseline: multiplier = 1, beta_t = per_turn_budget
+                        # When u > sample_baseline: multiplier > 1, beta_t > per_turn_budget (more exploration)
+                        # When u < sample_baseline: multiplier < 1, beta_t < per_turn_budget (less exploration)
+
+                        # Use tanh to smoothly bound the multiplier to [1-fluctuation, 1+fluctuation]
+                        multiplier = 1.0 + fluctuation * np.tanh(
+                            gamma * normalized_diff
+                        )
+                        beta_t = per_turn_budget * multiplier
+
+                        # Ensure beta_t is non-negative
+                        beta_t = max(0.0, beta_t)
+
                     all_betas.append(beta_t)
 
                     # Apply to action tokens of this turn (not obs tokens)
@@ -1452,7 +1475,19 @@ class RayPPOTrainer:
         # Compute metrics
         metrics["wm_entropy/per_turn_budget"] = per_turn_budget
         metrics["wm_entropy/fluctuation"] = fluctuation
-        
+        metrics["wm_entropy/sparse_mode"] = 1.0 if sparse_mode else 0.0
+        metrics["wm_entropy/sparsity_threshold"] = (
+            sparsity_threshold if sparse_mode else 0.0
+        )
+
+        # Count how many turns got entropy (useful for sparse mode)
+        turns_with_entropy = sum(1 for b in all_betas if b > 0)
+        total_turns = len(all_betas)
+        metrics["wm_entropy/turns_with_entropy"] = turns_with_entropy
+        metrics["wm_entropy/entropy_sparsity"] = turns_with_entropy / max(
+            total_turns, 1
+        )
+
         if all_uncertainties:
             # uncertainty_mean is the dynamic baseline (average across all turns in batch)
             batch_mean_uncertainty = np.mean(all_uncertainties)
@@ -1470,7 +1505,9 @@ class RayPPOTrainer:
             metrics["wm_entropy/beta_min"] = np.min(all_betas)
             metrics["wm_entropy/beta_max"] = np.max(all_betas)
             # Beta relative to per_turn_budget
-            metrics["wm_entropy/beta_mean_ratio"] = np.mean(all_betas) / per_turn_budget if per_turn_budget > 0 else 1.0
+            metrics["wm_entropy/beta_mean_ratio"] = (
+                np.mean(all_betas) / per_turn_budget if per_turn_budget > 0 else 1.0
+            )
         metrics["wm_entropy/valid_samples"] = valid_samples
         metrics["wm_entropy/total_samples"] = batch_size
 
@@ -1738,7 +1775,7 @@ class RayPPOTrainer:
                                 batch, self.reward_fn
                             )
 
-                    # recompute old_log_probs
+                    # recompute old_log_probs (behavior policy log probabilities)
                     with marked_timer("old_log_prob", timing_raw, color="blue"):
                         # ===== DEBUG LOGGING START =====
                         print("=" * 80)
@@ -1770,8 +1807,86 @@ class RayPPOTrainer:
                         print("=" * 80)
                         # ===== DEBUG LOGGING END =====
 
-                        old_log_prob = self.actor_rollout_wg.compute_log_prob(batch)
-                        entropys = old_log_prob.batch["entropys"]
+                        # Check if turn-level temperature is enabled
+                        # When enabled, rollout_log_probs already contains log μ_T (behavior policy log prob)
+                        # which should be used directly as old_log_probs for correct IS correction
+                        turn_temp_config = (
+                            self.config.actor_rollout_ref.rollout.multi_turn.get(
+                                "turn_level_temperature", {}
+                            )
+                        )
+                        turn_temp_enabled = turn_temp_config.get("enabled", False)
+                        has_rollout_logprobs = "rollout_log_probs" in batch.batch
+                        use_rollout_logprobs_as_old = (
+                            turn_temp_enabled and has_rollout_logprobs
+                        )
+
+                        # CRITICAL: Warn if turn-level temp is enabled but rollout_log_probs not available
+                        if turn_temp_enabled and not has_rollout_logprobs:
+                            print(
+                                "[TurnLevelTemp] WARNING: turn_level_temperature is enabled but rollout_log_probs "
+                                "is not in batch! This means calculate_log_probs=False in rollout config. "
+                                "Set actor_rollout_ref.rollout.calculate_log_probs=True for correct IS correction."
+                            )
+
+                        # Log turn-level temperature statistics if available
+                        has_token_temps = "token_temperatures" in batch.non_tensor_batch
+                        if has_token_temps:
+                            token_temps_raw = batch.non_tensor_batch.get(
+                                "token_temperatures", None
+                            )
+                            if token_temps_raw is not None:
+                                all_temps = []
+                                for temps in token_temps_raw:
+                                    if temps is not None and len(temps) > 0:
+                                        all_temps.extend(temps)
+                                if all_temps:
+                                    import numpy as np
+
+                                    metrics["turn_temp/mean"] = np.mean(all_temps)
+                                    metrics["turn_temp/std"] = (
+                                        np.std(all_temps) if len(all_temps) > 1 else 0.0
+                                    )
+                                    metrics["turn_temp/min"] = np.min(all_temps)
+                                    metrics["turn_temp/max"] = np.max(all_temps)
+                                    # Count tokens with T != 1.0 (adjusted temperatures)
+                                    adjusted_count = sum(
+                                        1 for t in all_temps if abs(t - 1.0) > 0.01
+                                    )
+                                    metrics["turn_temp/adjusted_ratio"] = (
+                                        adjusted_count / len(all_temps)
+                                    )
+                                    print(
+                                        f"[TurnLevelTemp] Batch stats: mean={metrics['turn_temp/mean']:.3f}, "
+                                        f"range=[{metrics['turn_temp/min']:.3f}, {metrics['turn_temp/max']:.3f}], "
+                                        f"adjusted_ratio={metrics['turn_temp/adjusted_ratio']:.2%}"
+                                    )
+
+                        # Also log turn-level uncertainties if available
+                        if "turn_uncertainties" in batch.non_tensor_batch:
+                            turn_u_raw = batch.non_tensor_batch.get(
+                                "turn_uncertainties", None
+                            )
+                            if turn_u_raw is not None:
+                                all_u = []
+                                for u_list in turn_u_raw:
+                                    if u_list is not None and len(u_list) > 0:
+                                        all_u.extend(u_list)
+                                if all_u:
+                                    import numpy as np
+
+                                    metrics["turn_temp/uncertainty_mean"] = np.mean(
+                                        all_u
+                                    )
+                                    metrics["turn_temp/uncertainty_std"] = (
+                                        np.std(all_u) if len(all_u) > 1 else 0.0
+                                    )
+
+                        # Always compute log_prob with T=1 to get entropy for entropy bonus
+                        # (entropy should be computed on the learned policy, not the behavior policy)
+                        actor_log_prob = self.actor_rollout_wg.compute_log_prob(batch)
+
+                        entropys = actor_log_prob.batch["entropys"]
                         response_masks = batch.batch["response_mask"]
                         loss_agg_mode = (
                             self.config.actor_rollout_ref.actor.loss_agg_mode
@@ -1800,8 +1915,43 @@ class RayPPOTrainer:
                         # ===== DEBUG LOGGING END =====
 
                         metrics.update(old_log_prob_metrics)
-                        old_log_prob.batch.pop("entropys")
-                        batch = batch.union(old_log_prob)
+                        actor_log_prob.batch.pop("entropys")
+
+                        # CRITICAL FIX: Use correct behavior policy log_prob for IS correction
+                        # When turn-level temperature is enabled:
+                        #   - rollout_log_probs = log μ_T = log softmax(z/T) (from sglang/vLLM during sampling)
+                        #   - This is the TRUE behavior policy log_prob and should be used as old_log_probs
+                        #   - ratio = π_θ_new / μ_T = exp(log π_θ_new - log μ_T)
+                        # When turn-level temperature is NOT enabled (T=1 everywhere):
+                        #   - Use actor_log_prob["old_log_probs"] as before (both are log π)
+                        if use_rollout_logprobs_as_old:
+                            print(
+                                "[TurnLevelTemp] Using rollout_log_probs as old_log_probs for correct IS correction"
+                            )
+                            # rollout_log_probs is already log μ_T from the behavior policy
+                            batch.batch["old_log_probs"] = batch.batch[
+                                "rollout_log_probs"
+                            ]
+
+                            # Log the difference between actor (T=1) and rollout (T≠1) log_probs
+                            actor_lp = actor_log_prob.batch["old_log_probs"]
+                            rollout_lp = batch.batch["rollout_log_probs"]
+                            diff = (actor_lp - rollout_lp).abs()
+                            masked_diff = diff * response_masks
+                            if response_masks.sum() > 0:
+                                mean_diff = masked_diff.sum() / response_masks.sum()
+                                max_diff = masked_diff.max()
+                                metrics["turn_temp/logprob_diff_mean"] = (
+                                    mean_diff.item()
+                                )
+                                metrics["turn_temp/logprob_diff_max"] = max_diff.item()
+                                print(
+                                    f"[TurnLevelTemp] log_prob diff (actor vs rollout): "
+                                    f"mean={mean_diff.item():.4f}, max={max_diff.item():.4f}"
+                                )
+                        else:
+                            # Standard case: no temperature variation, actor log_prob = behavior log_prob
+                            batch = batch.union(actor_log_prob)
 
                         if "rollout_log_probs" in batch.batch.keys():
                             # TODO: we may want to add diff of probs too.

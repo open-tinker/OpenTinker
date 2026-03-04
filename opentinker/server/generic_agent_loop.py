@@ -134,6 +134,18 @@ class GenericAgentData:
         # Reward tracking (for turn-level rewards, accumulated for final reward)
         self.turn_scores: list[float] = []
 
+        # Turn-level temperature tracking (for WM-guided exploration)
+        # Stores uncertainty from each turn's observation tokens
+        self.turn_uncertainties: list[float] = []
+        # Temperature used for each turn's generation (for logging)
+        self.turn_temperatures: list[float] = []
+
+        # Token-level temperature for IS correction
+        # token_temperatures[i] = temperature used when sampling token i
+        # This is needed for proper importance sampling correction:
+        # ratio = π_θ(a|s) / μ_T(a|s) where μ_T is the behavior policy with temperature T
+        self.token_temperatures: list[float] = []
+
         # Extra fields for additional data
         self.extra_fields: dict[str, Any] = {}
 
@@ -188,6 +200,43 @@ class GenericAgentLoop(AgentLoopBase):
         cls.max_tokens_per_turn = config.actor_rollout_ref.rollout.multi_turn.get(
             "max_tokens_per_turn", None
         )
+
+        # Turn-level temperature configuration (WM-guided exploration)
+        # T_t = T_base + kappa * normalize(u_{t-1})
+        # where u_{t-1} is the uncertainty from the previous turn's observation
+        cls.turn_level_temperature = config.actor_rollout_ref.rollout.multi_turn.get(
+            "turn_level_temperature", {}
+        )
+        cls.turn_temp_enabled = cls.turn_level_temperature.get("enabled", False)
+        cls.turn_temp_base = cls.turn_level_temperature.get("base_temperature", 1.0)
+        cls.turn_temp_kappa = cls.turn_level_temperature.get("kappa", 0.5)
+        cls.turn_temp_min = cls.turn_level_temperature.get("min_temperature", 0.5)
+        cls.turn_temp_max = cls.turn_level_temperature.get("max_temperature", 2.0)
+        # EMA for uncertainty normalization
+        cls.turn_temp_ema_decay = cls.turn_level_temperature.get("ema_decay", 0.9)
+        cls._uncertainty_ema_mean = None  # Will be initialized on first observation
+        cls._uncertainty_ema_std = None
+        # IS correction: when True, token_temperatures are recorded and used in PPO loss
+        # to correct ratio = exp((log π_θ - log π_old) / T)
+        cls.enable_is_correction = cls.turn_level_temperature.get(
+            "enable_is_correction", True
+        )
+
+        # CRITICAL: Validate configuration
+        # If turn_level_temperature is enabled but IS correction is disabled, PPO assumptions are violated!
+        # The old_log_prob would be computed with T=1, but sampling used T≠1
+        if cls.turn_temp_enabled and not cls.enable_is_correction:
+            import warnings
+
+            warnings.warn(
+                "\n⚠️  CONFIGURATION WARNING ⚠️\n"
+                "turn_level_temperature.enabled=True but enable_is_correction=False!\n"
+                "This violates PPO's on-policy assumption and will cause ENTROPY COLLAPSE!\n"
+                "Either:\n"
+                "  1. Set enable_is_correction=True (recommended), or\n"
+                "  2. Set turn_level_temperature.enabled=False\n",
+                RuntimeWarning,
+            )
 
         # Pre-compute system prompt tokens for later stripping
         cls.system_prompt = tokenizer.apply_chat_template(
@@ -470,6 +519,19 @@ class GenericAgentLoop(AgentLoopBase):
         # Add turn_ids for turn-wise dynamic entropy coefficient
         # turn_ids[i] = which turn token i belongs to (0-indexed)
         output.extra_fields["turn_ids"] = agent_data.turn_ids[: self.response_length]
+        # Add turn-level temperature info for logging
+        output.extra_fields["turn_temperatures"] = agent_data.turn_temperatures
+        output.extra_fields["turn_uncertainties"] = agent_data.turn_uncertainties
+        # Add token-level temperatures for IS correction in PPO (only if enabled)
+        # token_temperatures[i] = temperature used when sampling token i
+        if (
+            self.turn_temp_enabled
+            and self.enable_is_correction
+            and agent_data.token_temperatures
+        ):
+            output.extra_fields["token_temperatures"] = agent_data.token_temperatures[
+                : self.response_length
+            ]
         # Add any other extra fields (except the ones we already set)
         for key, value in agent_data.extra_fields.items():
             if key not in output.extra_fields:
@@ -552,10 +614,62 @@ class GenericAgentLoop(AgentLoopBase):
                     agent_data.turn_ids.append(
                         agent_data.assistant_turns
                     )  # Current turn
+                    if self.turn_temp_enabled and self.enable_is_correction:
+                        agent_data.token_temperatures.append(1.0)  # Default temperature
             return GenericAgentState.TERMINATED
 
         # Current turn index (0-indexed, based on assistant turns)
         current_turn = agent_data.assistant_turns
+
+        # Compute turn-level temperature based on previous turn's uncertainty
+        actual_sampling_params = sampling_params.copy()
+        turn_temperature = sampling_params.get("temperature", self.turn_temp_base)
+
+        print(
+            f"[TurnLevelTemp DEBUG] Turn {agent_data.assistant_turns}: "
+            f"turn_temp_enabled={self.turn_temp_enabled}, "
+            f"num_uncertainties={len(agent_data.turn_uncertainties)}"
+        )
+
+        if self.turn_temp_enabled and len(agent_data.turn_uncertainties) > 0:
+            # Use the most recent uncertainty (from previous turn's observation)
+            prev_uncertainty = agent_data.turn_uncertainties[-1]
+
+            # Normalize uncertainty using EMA statistics
+            if (
+                self._uncertainty_ema_mean is not None
+                and self._uncertainty_ema_std is not None
+            ):
+                if self._uncertainty_ema_std > 1e-6:
+                    normalized_u = (
+                        prev_uncertainty - self._uncertainty_ema_mean
+                    ) / self._uncertainty_ema_std
+                else:
+                    normalized_u = 0.0
+            else:
+                # First observation, use raw uncertainty (will be normalized later)
+                normalized_u = 0.0
+
+            # T_t = T_base + kappa * tanh(normalized_u)
+            # tanh bounds the effect to [-1, 1], so temperature is in [T_base - kappa, T_base + kappa]
+            import math
+
+            temp_adjustment = self.turn_temp_kappa * math.tanh(normalized_u)
+            turn_temperature = self.turn_temp_base + temp_adjustment
+
+            # Clamp to min/max
+            turn_temperature = max(
+                self.turn_temp_min, min(self.turn_temp_max, turn_temperature)
+            )
+
+            actual_sampling_params["temperature"] = turn_temperature
+            print(
+                f"[TurnLevelTemp] Turn {current_turn}: prev_uncertainty={prev_uncertainty:.3f}, "
+                f"normalized={normalized_u:.3f}, temperature={turn_temperature:.3f}"
+            )
+
+        # Record the temperature used for this turn
+        agent_data.turn_temperatures.append(turn_temperature)
 
         print(
             f"[GenericAgentLoop DEBUG] _handle_generating_state START: request_id={agent_data.request_id}, prompt_len={len(agent_data.prompt_ids)}, turn={current_turn}"
@@ -566,10 +680,11 @@ class GenericAgentLoop(AgentLoopBase):
                 f"[GenericAgentLoop DEBUG] Calling server_manager.generate() with image_data={agent_data.image_data is not None}..."
             )
             # CRITICAL: Pass image_data to vLLM for VL model inference
+            # Use actual_sampling_params which may have adjusted temperature
             output = await self.server_manager.generate(
                 request_id=agent_data.request_id,
                 prompt_ids=agent_data.prompt_ids,
-                sampling_params=sampling_params,
+                sampling_params=actual_sampling_params,
                 image_data=agent_data.image_data,
             )
             elapsed = time.time() - start_time
@@ -605,6 +720,13 @@ class GenericAgentLoop(AgentLoopBase):
         # Record turn ID for each token (used for turn-wise dynamic entropy coefficient)
         # current_turn was captured BEFORE incrementing assistant_turns
         agent_data.turn_ids += [current_turn] * len(agent_data.response_ids)
+
+        # Record token-level temperature for IS correction (only if enabled)
+        # Each LLM-generated token was sampled with turn_temperature
+        if self.turn_temp_enabled and self.enable_is_correction:
+            agent_data.token_temperatures += [turn_temperature] * len(
+                agent_data.response_ids
+            )
 
         if response_log_probs:
             agent_data.response_logprobs += response_log_probs
@@ -718,10 +840,227 @@ class GenericAgentLoop(AgentLoopBase):
             # Pad logprobs with 0.0 for observation tokens
             agent_data.response_logprobs += [0.0] * len(response_ids)
 
+        # Pad token_temperatures with 1.0 for observation tokens (only if IS correction enabled)
+        # These tokens have response_mask=0 so they don't affect IS correction
+        if self.turn_temp_enabled and self.enable_is_correction:
+            agent_data.token_temperatures += [1.0] * len(response_ids)
+
+        # Compute turn-level uncertainty for the next turn's temperature adjustment
+        if self.turn_temp_enabled:
+            # Get the action token IDs from the last generation
+            # Find the last contiguous block of response_mask=1 tokens
+            last_action_start = -1
+            for i in range(len(agent_data.response_mask) - 1, -1, -1):
+                if agent_data.response_mask[i] == 1:
+                    last_action_start = i
+                elif last_action_start != -1:
+                    break
+
+            if last_action_start != -1:
+                action_token_ids = agent_data.prompt_ids[last_action_start:]
+            else:
+                action_token_ids = (
+                    agent_data.response_ids
+                    if hasattr(agent_data, "response_ids")
+                    else []
+                )
+
+            # Use accurate method (T=1 re-generation) or heuristic based on config
+            use_accurate = self.turn_level_temperature.get(
+                "use_accurate_uncertainty", True
+            )
+
+            if use_accurate:
+                turn_uncertainty = await self._compute_action_uncertainty_accurate(
+                    agent_data, action_token_ids
+                )
+            else:
+                turn_uncertainty = self._compute_action_uncertainty_heuristic(
+                    agent_data
+                )
+
+            agent_data.turn_uncertainties.append(turn_uncertainty)
+            print(
+                f"[TurnLevelTemp DEBUG] After observation: turn_uncertainties={agent_data.turn_uncertainties}, "
+                f"EMA_mean={self._uncertainty_ema_mean}, EMA_std={self._uncertainty_ema_std}"
+            )
+
+            # Update EMA statistics for normalization
+            if self._uncertainty_ema_mean is None:
+                GenericAgentLoop._uncertainty_ema_mean = turn_uncertainty
+                GenericAgentLoop._uncertainty_ema_std = 1.0  # Initial std
+            else:
+                # EMA update
+                decay = self.turn_temp_ema_decay
+                GenericAgentLoop._uncertainty_ema_mean = (
+                    decay * self._uncertainty_ema_mean + (1 - decay) * turn_uncertainty
+                )
+                # Approximate std update using running variance
+                diff = turn_uncertainty - self._uncertainty_ema_mean
+                GenericAgentLoop._uncertainty_ema_std = (
+                    decay * self._uncertainty_ema_std + (1 - decay) * abs(diff)
+                )
+
         if should_terminate:
             return GenericAgentState.TERMINATED
         else:
             return GenericAgentState.GENERATING
+
+    async def _compute_action_uncertainty_accurate(
+        self, agent_data: GenericAgentData, action_token_ids: list[int]
+    ) -> float:
+        """Compute ACCURATE uncertainty by re-generating with T=1.
+
+        This method calls the model with T=1 to get log π (true model distribution),
+        which is independent of the sampling temperature used during rollout.
+
+        Uncertainty = -mean(log π) = cross-entropy / perplexity
+
+        This is more accurate than using log μ_T from rollout, but requires an
+        extra generation call per turn.
+
+        Args:
+            agent_data: Current agent state
+            action_token_ids: Token IDs of the action (response) to evaluate
+
+        Returns:
+            float: Uncertainty score based on log π (T=1)
+        """
+        import numpy as np
+
+        if not action_token_ids:
+            print("[TurnLevelTemp] No action tokens, using default uncertainty 1.0")
+            return 1.0
+
+        try:
+            # Build prompt: everything before the action
+            prompt_before_action = agent_data.prompt_ids[: -len(action_token_ids)]
+
+            # We'll generate the same action tokens with T=1 to get log π
+            # Use a trick: set the prompt to include the action, generate 1 token
+            # and look at the returned log_probs
+
+            # Actually, a simpler approach: generate with T=1 and logprobs=True
+            # The log_probs returned will be log π (since T=1)
+            sampling_params = {
+                "temperature": 1.0,  # T=1 to get log π
+                "max_new_tokens": len(action_token_ids),  # Generate same length
+                "logprobs": True,
+                "top_p": 1.0,  # No top-p filtering
+                "top_k": -1,  # No top-k filtering
+            }
+
+            output = await self.server_manager.generate(
+                request_id=f"{agent_data.request_id}_uncertainty_t1",
+                prompt_ids=prompt_before_action,
+                sampling_params=sampling_params,
+                image_data=agent_data.image_data,
+            )
+
+            # Get log_probs from the T=1 generation
+            if output.log_probs and len(output.log_probs) > 0:
+                valid_logprobs = [
+                    lp for lp in output.log_probs if lp is not None and lp != 0.0
+                ]
+                if valid_logprobs:
+                    mean_logprob_pi = np.mean(valid_logprobs)
+                    uncertainty = -mean_logprob_pi
+                    uncertainty = max(0.1, min(10.0, uncertainty))
+                    print(
+                        f"[TurnLevelTemp] Accurate uncertainty (T=1): {uncertainty:.3f} "
+                        f"(mean_log_π={mean_logprob_pi:.3f}, num_tokens={len(valid_logprobs)})"
+                    )
+                    return uncertainty
+
+            print(
+                "[TurnLevelTemp] No log_probs from T=1 generation, falling back to heuristic"
+            )
+            return self._compute_action_uncertainty_heuristic(agent_data)
+
+        except Exception as e:
+            print(f"[TurnLevelTemp] Failed to compute accurate uncertainty: {e}")
+            return self._compute_action_uncertainty_heuristic(agent_data)
+
+    def _compute_action_uncertainty_heuristic(
+        self, agent_data: GenericAgentData
+    ) -> float:
+        """Compute uncertainty using log μ_T with temperature compensation.
+
+        Uses the log_probs from rollout (log μ_T) as a proxy for uncertainty,
+        with compensation for the temperature used during sampling.
+
+        Problem: log μ_T is affected by the sampling temperature T:
+        - High T → log μ_T more negative (flatter distribution)
+        - Low T → log μ_T closer to 0 (sharper distribution)
+
+        This creates a positive feedback loop if not compensated:
+        - High uncertainty → high T → log μ_T more negative → higher uncertainty → ...
+        - Low uncertainty → low T → log μ_T closer to 0 → lower uncertainty → ...
+
+        Compensation: We divide by T to approximate temperature-invariant uncertainty.
+        While log μ_T = log softmax(z/T) is not exactly log π / T, dividing by T
+        provides a reasonable approximation that breaks the feedback loop.
+
+        uncertainty ≈ -mean(log μ_T) / T
+
+        This way:
+        - If T was high and log μ_T was -0.3, uncertainty ≈ 0.3/1.5 = 0.2
+        - If T was low and log μ_T was -0.05, uncertainty ≈ 0.05/0.7 = 0.07
+
+        Both reflect similar underlying model confidence.
+
+        Args:
+            agent_data: Current agent state with response_logprobs
+
+        Returns:
+            float: Uncertainty score, clipped to [0.1, 3.0]
+        """
+        import numpy as np
+
+        if not agent_data.response_logprobs or len(agent_data.response_logprobs) == 0:
+            print("[TurnLevelTemp] No response_logprobs, using default uncertainty 1.0")
+            return 1.0
+
+        # Find action log_probs (response_mask == 1)
+        action_logprobs = []
+        for mask, logprob in zip(
+            agent_data.response_mask[-len(agent_data.response_logprobs) :],
+            agent_data.response_logprobs,
+        ):
+            if mask == 1 and logprob != 0.0 and logprob is not None:
+                action_logprobs.append(logprob)
+
+        if not action_logprobs:
+            action_logprobs = [
+                lp
+                for lp in agent_data.response_logprobs
+                if lp != 0.0 and lp is not None
+            ]
+
+        if not action_logprobs:
+            print("[TurnLevelTemp] No valid log_probs, using default uncertainty 1.0")
+            return 1.0
+
+        # Get temperature used for this turn
+        current_turn_T = (
+            agent_data.turn_temperatures[-1] if agent_data.turn_temperatures else 1.0
+        )
+
+        mean_logprob_mu_T = np.mean(action_logprobs)
+
+        # Temperature-compensated uncertainty: divide by T to approximate log π
+        # This breaks the positive feedback loop where T affects log μ_T which affects T
+        raw_uncertainty = -mean_logprob_mu_T / current_turn_T
+
+        # Clip to reasonable range [0.1, 3.0]
+        # Using tighter range to prevent extreme temperature swings
+        uncertainty = max(0.1, min(3.0, raw_uncertainty))
+
+        print(
+            f"[TurnLevelTemp] Heuristic uncertainty: {uncertainty:.3f} "
+            f"(raw={raw_uncertainty:.3f}, mean_log_μT={mean_logprob_mu_T:.3f}, T={current_turn_T:.2f})"
+        )
+        return uncertainty
 
     async def _save_debug_images(self, image_data: list, request_id: str):
         """Save debug images to disk when SAVE_DEBUG_IMAGES env var is set.
