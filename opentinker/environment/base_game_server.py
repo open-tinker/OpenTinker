@@ -42,6 +42,16 @@ import uvicorn
 from opentinker.environment.base_game import AbstractGame
 
 
+def _close_game_instance(game: AbstractGame) -> None:
+    """Best-effort cleanup hook for game instances."""
+    close_fn = getattr(game, "close", None)
+    if callable(close_fn):
+        try:
+            close_fn()
+        except Exception as exc:
+            print(f"[WARN] Failed to close {game.__class__.__name__}: {exc}")
+
+
 class BaseGameStats:
     """Thread-safe base statistics tracker for game server.
 
@@ -426,6 +436,7 @@ def create_game_app(
         instance_id = request.instance_id
         with games_lock:
             if instance_id in games:
+                _close_game_instance(games[instance_id])
                 del games[instance_id]
                 return {"message": f"Instance {instance_id} removed"}
         return {"message": f"Instance {instance_id} not found", "status": "ignored"}
@@ -456,6 +467,7 @@ def create_game_app(
         if result.done:
             with games_lock:
                 if instance_id in games:
+                    _close_game_instance(games[instance_id])
                     del games[instance_id]
 
         return {

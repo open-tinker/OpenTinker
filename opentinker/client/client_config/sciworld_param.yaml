@@ -1,0 +1,63 @@
+# ScienceWorld training configuration
+# Use with: python sciworld_rl.py
+
+project_name: opentinker
+experiment_name: sciworld_training
+
+logger_backends: ["console", "wandb"]
+
+enable_tracing: true
+weave_project: null
+
+wandb_key: null
+
+tokenizer_path: null
+
+batch_size: 4
+num_workers: 0 # Keep local prompt generation single-process; ScienceWorld uses per-instance ports.
+num_epochs: null
+num_steps: 1000
+save_freq: 200
+test_freq: 50
+
+val_batch_size: 32
+
+temperature: 1
+top_p: 1
+max_new_tokens: 4096
+max_prompt_tokens: 2048
+
+algorithm: "agent_loop"
+adv_estimator: "grpo"
+rollout_n: 8
+
+interaction:
+  name: sciworld
+  class_path: opentinker.environment.gym_environment_interaction.GymEnvironmentInteraction
+  config:
+    env_host: 0.0.0.0
+    env_port: 8092
+    env_endpoint: http://${interaction.config.env_host}:${interaction.config.env_port}
+    env_shards: 32
+    max_steps: 30
+    max_total_steps: 30
+    observation_template: "{observation}"
+    split: train # train, dev, test
+    task_names: null # e.g. ["boil", "find-animal"]
+    task_ids: null
+    variation_indices: null
+    simplification_str: ""
+    jar_path: null
+    local_thread_base: 20000
+
+multi_turn:
+  max_user_turns: ${interaction.config.max_total_steps}
+  max_assistant_turns: ${interaction.config.max_total_steps}
+  max_tokens_per_turn: 512
+  weave_project: "opentinker/sciworld"
+  experiment_name: "sciworld_interaction"
+
+scheduler_url: "http://0.0.0.0:8780"
+scheduler_api_key: null
+
+num_gpus: 8
