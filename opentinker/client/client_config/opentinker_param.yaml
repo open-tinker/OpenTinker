@@ -38,6 +38,8 @@ max_new_tokens: 4096
 max_prompt_tokens: 4096
 
 algorithm: "toolcall"
+# Enable dynamic batch sizing by default to avoid requiring fixed micro-batch settings.
+use_dynamic_bsz: true
 
 logger_backends: ["console"] # options: ["console", "wandb"]
 wandb_key: null

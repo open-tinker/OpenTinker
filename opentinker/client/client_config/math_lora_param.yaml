@@ -46,6 +46,8 @@ algorithm: "agent_loop"
 # RL Algorithm settings
 adv_estimator: "grpo"
 rollout_n: 5 # Reduced for LoRA to save memory
+# Enable dynamic batch sizing by default to avoid requiring fixed micro-batch settings.
+use_dynamic_bsz: true
 
 # LoRA configuration (ENABLED)
 # Reference: verl/examples/grpo_trainer/run_qwen2_5-3b_gsm8k_grpo_lora.sh

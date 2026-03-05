@@ -40,9 +40,9 @@ python opentinker/client/math_rl.py \
     test_freq=5 \
     data_path=data/math_agentloop/train.parquet \
     val_data_path=data/math_agentloop/test.parquet \
-    scheduler_url=http://<server_endpoint>:<scheduler_port> \
-    interaction.config.env_port=<env_port> \
-    interaction.config.env_host=<client_endpoint>
+    scheduler_url=http://localhost:8781 \
+    interaction.config.env_port=8083 \
+    interaction.config.env_host=localhost
 ```
 
 ## Step 5: Run Inference (Optional)

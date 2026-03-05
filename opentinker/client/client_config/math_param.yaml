@@ -52,6 +52,8 @@ algorithm: "agent_loop"
 adv_estimator: "grpo"
 # rollout_n: number of samples per prompt for GRPO/grpo_per_step (only used when adv_estimator=grpo or grpo_per_step)
 rollout_n: 16
+# Enable dynamic batch sizing by default to avoid requiring fixed micro-batch settings.
+use_dynamic_bsz: true
 
 # LoRA configuration (parameter-efficient fine-tuning)
 # Set lora_rank > 0 to enable LoRA training

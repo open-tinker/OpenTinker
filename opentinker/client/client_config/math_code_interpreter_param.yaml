@@ -49,6 +49,8 @@ algorithm: "agent_loop"
 adv_estimator: "grpo"
 # rollout_n: number of samples per prompt for GRPO (only used when adv_estimator=grpo)
 rollout_n: 8
+# Enable dynamic batch sizing by default to avoid requiring fixed micro-batch settings.
+use_dynamic_bsz: true
 
 # Multi-turn configuration
 multi_turn:

@@ -610,6 +610,11 @@ class ServiceClient:
                     "model": {
                         "path": args.tokenizer_path,
                     },
+                    "actor": {
+                        "use_dynamic_bsz": bool(
+                            getattr(args, "use_dynamic_bsz", True)
+                        ),
+                    },
                     "rollout": {
                         "tensor_model_parallel_size": 2 if args.num_gpus > 1 else 1,
                     },

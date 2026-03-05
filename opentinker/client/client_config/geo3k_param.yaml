@@ -48,6 +48,8 @@ algorithm: "agent_loop"
 # GRPO is recommended for VL tasks
 adv_estimator: "grpo"
 rollout_n: 5 # Number of samples per prompt for GRPO
+# Enable dynamic batch sizing by default to avoid requiring fixed micro-batch settings.
+use_dynamic_bsz: true
 
 # Interaction configuration
 interaction:

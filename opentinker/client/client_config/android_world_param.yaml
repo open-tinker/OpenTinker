@@ -50,6 +50,8 @@ algorithm: "agent_loop"
 adv_estimator: "gae"
 # rollout_n: For PPO (gae), rollout_n is always 1 (forced by server)
 rollout_n: 1
+# Enable dynamic batch sizing by default to avoid requiring fixed micro-batch settings.
+use_dynamic_bsz: true
 
 # Server-side agent loop workers (should match number of emulators)
 agent_num_workers: 4

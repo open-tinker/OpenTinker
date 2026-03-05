@@ -57,6 +57,8 @@ max_prompt_tokens: 2048
 # Algorithm selection
 # IMPORTANT: Must be "agent_loop" for GenericEnvironment
 algorithm: "agent_loop"
+# Enable dynamic batch sizing by default to avoid requiring fixed micro-batch settings.
+use_dynamic_bsz: true
 
 # Logging
 logger_backends: ["console", "wandb"] # Add "wandb" if needed

@@ -47,6 +47,8 @@ algorithm: "agent_loop"
 # RL Algorithm settings (passed to server via scheduler)
 adv_estimator: "grpo"
 rollout_n: 16 # Reduced from 5 for VL model
+# Enable dynamic batch sizing by default to avoid requiring fixed micro-batch settings.
+use_dynamic_bsz: true
 
 # Multi-turn configuration
 multi_turn:
