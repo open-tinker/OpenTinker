@@ -1,8 +1,9 @@
 # On-Policy Distillation Configuration (Math task)
-# Combines any RL advantage estimator with a per-token KL penalty toward a teacher model.
-#
-# Algorithm:  A_final = A_base - kl_coef * (log π_student - log π_teacher)
-# Where A_base comes from adv_estimator (grpo / gae / grpo_per_step).
+# Token-level OPD default:
+# - Teacher signal enters policy-gradient advantage:
+#     A_teacher = log π_teacher(a_t) - log π_student(a_t)
+# - KL regularization stays outside PG:
+#     L = L_pg + beta_kl * L_kl
 
 # Project settings
 project_name: opentinker
@@ -51,20 +52,21 @@ algorithm: "agent_loop"
 #   "gae"           : GAE / PPO (requires critic)
 adv_estimator: "grpo"
 rollout_n: 16
+# Enable dynamic batch sizing by default to avoid requiring fixed micro-batch settings.
+use_dynamic_bsz: true
 
 # On-policy distillation switch.
-# When true, a per-token KL advantage is added on top of the RL advantage:
-#   A_final = A_base - kl_coef * KL(student || teacher)
+# When true, token-level teacher signal is injected into advantage:
+#   A_final = A_base + (log π_teacher - log π_student)
 use_kl_in_advantage: true
 
-# KL penalty coefficient α.
-# Higher → stay closer to teacher; lower → optimize reward freely.
+# External KL loss coefficient beta_kl (outside policy gradient).
+# Higher → stay closer to teacher; lower → optimize reward more freely.
 kl_penalty_coef: 0.1
 
-# Disable RL reward signal: zero out base advantages before applying KL penalty.
-# When true (requires use_kl_in_advantage=true), the advantage becomes:
-#   A_final = -kl_coef * KL(student || teacher)
-# The model is trained purely to match the teacher distribution, ignoring task reward.
+# Disable RL reward signal: zero out base advantages before adding teacher signal.
+# When true (requires use_kl_in_advantage=true), the PG advantage becomes:
+#   A_final = log π_teacher - log π_student
 disable_rl_reward: false
 
 # LoRA configuration

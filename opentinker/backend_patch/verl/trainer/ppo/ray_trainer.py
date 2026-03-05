@@ -82,7 +82,6 @@ from opentinker.backend_patch.verl.trainer.ppo.reward import (
 )
 from opentinker.backend_patch.verl.trainer.ppo.per_step_core_algos import (
     compute_grpo_per_step_advantage,
-    incorporate_kl_penalty_in_advantage,
 )
 
 

@@ -11,7 +11,10 @@ When `algorithm.opsd.enable=true`, the server computes `ref_log_prob` using a pr
 
 - CoT source is fixed to `extra_info.answer`
 - Student rollout and `old_log_probs` stay unchanged
-- The update still uses the existing KL-in-advantage path
+- Token-level OPD teacher signal is added into policy gradient:
+  `A_teacher = log π_teacher(a_t|s+hint) - log π_student(a_t|s)`
+- External KL regularization is applied outside PG:
+  `L = L_pg + β_KL * L_KL` (`β_KL = algorithm.kl_penalty_coef`)
 - Teacher parameter mode is controlled by `algorithm.opsd.teacher_mode` (`fixed` or `shared`)
 - Optional full-vocab objective can be enabled via
   `algorithm.opsd.full_vocab_jsd.enable=true` (JSD over full token distributions)
@@ -27,13 +30,17 @@ Notes:
 
 - `shared` mode only changes OPSD teacher-context ref computation.
 - If `teacher_model_path` is set, it is used by `fixed` mode.
-- `shared` mode avoids standalone RefPolicy model loading when no other KL path requires it.
+- `shared` mode avoids standalone RefPolicy model loading for token-level OPSD/OPD path.
 
 ## Training modes
 
 1. Pure RL: `use_kl_in_advantage=false`
 2. RL + OPSD: `use_kl_in_advantage=true`, `disable_rl_reward=false`, `algorithm.opsd.enable=true`
 3. Pure OPSD-style distill: `use_kl_in_advantage=true`, `disable_rl_reward=true`, `algorithm.opsd.enable=true`
+
+For 2/3 above (non-full-vocab mode):
+- `A_final = A_base + A_teacher`
+- if `disable_rl_reward=true`, `A_base=0`, so `A_final=A_teacher`
 
 ## Run
 

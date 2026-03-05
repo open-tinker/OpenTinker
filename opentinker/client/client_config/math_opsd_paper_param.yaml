@@ -47,6 +47,8 @@ max_prompt_tokens: 4096
 
 # Rollout sampling count per prompt
 rollout_n: 1
+# Enable dynamic batch sizing by default (can still be overridden via server_overrides).
+use_dynamic_bsz: true
 
 # Algorithm settings
 algorithm:

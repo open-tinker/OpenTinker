@@ -1,18 +1,13 @@
 #!/usr/bin/env python3
 """On-Policy Distillation client for Math tasks.
 
-Trains a student model with combined RL + KL-distillation advantage:
+Token-level OPD objective:
+1) Policy-gradient advantage uses teacher token signal:
+   A_teacher = log π_teacher(a_t) - log π_student(a_t)
+2) KL regularization is applied outside PG via actor KL loss:
+   L = L_pg + beta_kl * L_kl
 
-    A_final = A_base - kl_coef * (log π_student - log π_teacher)
-
-where A_base is computed by the chosen adv_estimator (grpo / gae / grpo_per_step)
-and the KL term is added per-token *after* advantage normalisation.
-
-Key config knobs:
-    adv_estimator    : "grpo" | "gae" | "grpo_per_step"
-    use_kl_in_advantage: true
-    kl_penalty_coef  : α  (default 0.1)
-    teacher_model_path: path to teacher HF model (null → use initial student weights)
+`kl_penalty_coef` is forwarded as `beta_kl` (actor KL loss coefficient).
 """
 
 import hydra
@@ -37,6 +32,7 @@ def main(args):
     print(f"  use_kl_in_advantage: {args.get('use_kl_in_advantage', False)}")
     print(f"  kl_penalty_coef   : {args.get('kl_penalty_coef', 0.1)}")
     print(f"  disable_rl_reward : {args.get('disable_rl_reward', False)}")
+    print(f"  use_dynamic_bsz   : {args.get('use_dynamic_bsz', True)}")
     print(f"  teacher_model_path: {args.get('teacher_model_path', None)}")
     print("=" * 60)
 
@@ -106,6 +102,9 @@ def main(args):
             },
             "actor_rollout_ref": {
                 "model": {"path": args.tokenizer_path},
+                "actor": {
+                    "use_dynamic_bsz": bool(args.get("use_dynamic_bsz", True)),
+                },
                 "rollout": {
                     "tensor_model_parallel_size": 2 if args.num_gpus > 1 else 1,
                 },

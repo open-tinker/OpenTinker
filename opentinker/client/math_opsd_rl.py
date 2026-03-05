@@ -28,6 +28,7 @@ def main(args):
     print(f"  algorithm.opsd.enable  : {algo.get('opsd', {}).get('enable', False)}")
     print(f"  algorithm.opsd.teacher_mode : {algo.get('opsd', {}).get('teacher_mode', 'fixed')}")
     print(f"  algorithm.opsd.full_vocab_jsd.enable : {algo.get('opsd', {}).get('full_vocab_jsd', {}).get('enable', False)}")
+    print(f"  use_dynamic_bsz      : {args.get('use_dynamic_bsz', True)}")
     print(f"  val_before_train      : {args.get('val_before_train', True)}")
     print(f"  teacher_model_path     : {args.get('teacher_model_path', None)}")
     print(f"  lora_rank              : {args.get('lora', {}).get('lora_rank', 0)}")
@@ -90,13 +91,9 @@ def main(args):
                 model_cfg[key] = lora_cfg[key]
 
     opsd_cfg = algo.get("opsd", {})
-    opsd_full_vocab_jsd_cfg = {}
-    if hasattr(opsd_cfg, "full_vocab_jsd"):
-        opsd_full_vocab_jsd_cfg = OmegaConf.to_container(
-            opsd_cfg.full_vocab_jsd, resolve=True
-        )
-    elif isinstance(opsd_cfg, dict) and "full_vocab_jsd" in opsd_cfg:
-        opsd_full_vocab_jsd_cfg = dict(opsd_cfg["full_vocab_jsd"])
+    opsd_full_vocab_jsd_cfg = OmegaConf.to_container(
+        opsd_cfg.get("full_vocab_jsd", {}), resolve=True
+    )
 
     server_cfg = OmegaConf.create(
         {
@@ -106,6 +103,9 @@ def main(args):
             },
             "actor_rollout_ref": {
                 "model": model_cfg,
+                "actor": {
+                    "use_dynamic_bsz": bool(args.get("use_dynamic_bsz", True)),
+                },
                 "rollout": {
                     "tensor_model_parallel_size": args.num_gpus if args.num_gpus > 1 else 1,
                     "n": int(args.rollout_n),

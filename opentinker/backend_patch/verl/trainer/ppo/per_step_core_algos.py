@@ -300,17 +300,23 @@ def _fallback_to_standard_grpo(
     return advantages, advantages
 
 
-def incorporate_kl_penalty_in_advantage(
+def incorporate_teacher_signal_in_advantage(
     data,
-    kl_penalty_coef: float,
+    *,
+    combine_with_base_advantage: bool = True,
 ):
-    """Add per-token KL penalty to advantages for on-policy distillation.
+    """Inject token-level OPD teacher signal into policy-gradient advantage.
 
-    Can be applied on top of any base advantage estimator (GRPO, GAE/PPO, etc.):
-        A_final_t = A_base_t - α * (log π_student(a_t) - log π_teacher(a_t))
+    Token-level teacher signal:
+        A_teacher_t = log π_teacher(a_t | s + hint) - log π_student(a_t | s)
 
-    Adding KL *after* advantage normalization keeps the task signal scale intact
-    while the KL term acts as an independent penalty for teacher divergence.
+    Final advantage:
+        A_final_t = A_base_t + A_teacher_t  (when combine_with_base_advantage=True)
+        A_final_t = A_teacher_t             (when combine_with_base_advantage=False)
+
+    Note:
+        The explicit KL regularizer should be handled by actor KL loss
+        (`actor.use_kl_loss`) outside of this advantage term.
 
     Args:
         data: DataProto with keys:
@@ -318,21 +324,37 @@ def incorporate_kl_penalty_in_advantage(
             - old_log_probs: student log-probs at training time (batch, response_len)
             - ref_log_prob: teacher/reference log-probs (batch, response_len)
             - response_mask: 1 for LLM tokens, 0 for env/padding tokens
-        kl_penalty_coef: α — weight of KL penalty relative to task advantage
+        combine_with_base_advantage:
+            True -> add teacher signal on top of existing advantages.
+            False -> replace existing advantages with teacher signal only.
 
     Returns:
         data with batch["advantages"] and batch["returns"] updated in-place.
     """
-    advantages = data.batch["advantages"]
-    old_log_probs = data.batch["old_log_probs"]   # log π_student
-    ref_log_probs = data.batch["ref_log_prob"]     # log π_teacher
+    old_log_probs = data.batch["old_log_probs"]  # log π_student
+    ref_log_probs = data.batch["ref_log_prob"]  # log π_teacher
     response_mask = data.batch["response_mask"]
 
-    # Reverse KL per token: positive when student diverges from teacher
-    kl = (old_log_probs - ref_log_probs) * response_mask
-
-    # Subtract α * KL from advantages (divergence lowers advantage)
-    data.batch["advantages"] = advantages - kl_penalty_coef * kl
+    teacher_signal = (ref_log_probs - old_log_probs) * response_mask
+    if combine_with_base_advantage:
+        data.batch["advantages"] = data.batch["advantages"] + teacher_signal
+    else:
+        data.batch["advantages"] = teacher_signal
     data.batch["returns"] = data.batch["advantages"]
 
     return data
+
+
+def incorporate_kl_penalty_in_advantage(
+    data,
+    kl_penalty_coef: float,
+):
+    """Backward-compatible wrapper for old API.
+
+    The KL term is no longer scaled and injected here; `kl_penalty_coef` should
+    be applied via actor KL loss outside policy gradient.
+    """
+    _ = kl_penalty_coef
+    return incorporate_teacher_signal_in_advantage(
+        data, combine_with_base_advantage=True
+    )

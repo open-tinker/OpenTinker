@@ -77,7 +77,7 @@ from opentinker.backend_patch.verl.trainer.ppo.ray_trainer import (
     compute_response_mask,
 )
 from opentinker.backend_patch.verl.trainer.ppo.per_step_core_algos import (
-    incorporate_kl_penalty_in_advantage,
+    incorporate_teacher_signal_in_advantage,
 )
 
 from opentinker.backend_patch.verl.trainer.ppo.reward import (
@@ -469,50 +469,29 @@ def build_resource_pool_manager(config):
         # Role.RewardModel: global_pool_id,
     }
 
-    # mapping = {}
-    # if config.actor_rollout_ref.hybrid_engine:
-    #     mapping[Role.ActorRollout] = "ppo_pool"
-    # if config.critic.enable:
-    #     mapping[Role.Critic] = "ppo_pool"
-    # if hasattr(config, "ref_policy") and config.ref_policy.enable:
-    #     mapping[Role.RefPolicy] = "ppo_pool"
-    # if config.reward_model.enable:
-    #     mapping[Role.RewardModel] = "ppo_pool"
-
     return ResourcePoolManager(resource_pool_spec=resource_pool_spec, mapping=mapping)
 
 
-def _resolve_opsd_runtime_flags(config):
-    return resolve_opsd_runtime_flags(config)
+def _apply_default_token_level_opd_config(config):
+    """Map token-level OPD config to actor KL-loss config.
 
+    For non-full-vocab OPSD runs with `algorithm.use_kl_in_advantage=true`,
+    we use:
+    - teacher signal in PG advantage (handled in train_step)
+    - explicit KL loss outside PG via actor.use_kl_loss
+    """
+    opsd_flags = resolve_opsd_runtime_flags(config)
+    use_token_level_opd = bool(config.algorithm.get("use_kl_in_advantage", False))
+    if not use_token_level_opd or opsd_flags["opsd_full_vocab_jsd_enabled"]:
+        return
 
-def _validate_opsd_full_vocab_jsd_config(
-    config,
-    *,
-    opsd_enabled: bool,
-    opsd_full_vocab_jsd_enabled: bool,
-    **_,
-):
-    validate_opsd_full_vocab_jsd_config(
-        config,
-        opsd_enabled=opsd_enabled,
-        opsd_full_vocab_jsd_enabled=opsd_full_vocab_jsd_enabled,
-    )
-
-
-def _should_create_ref_policy_worker(
-    config,
-    *,
-    opsd_enabled: bool,
-    opsd_shared_teacher: bool,
-    opsd_full_vocab_jsd_enabled: bool,
-    **_,
-) -> bool:
-    return should_create_ref_policy_worker(
-        config,
-        opsd_enabled=opsd_enabled,
-        opsd_shared_teacher=opsd_shared_teacher,
-        opsd_full_vocab_jsd_enabled=opsd_full_vocab_jsd_enabled,
+    kl_coef = float(config.algorithm.kl_ctrl.kl_coef)
+    with open_dict(config):
+        config.actor_rollout_ref.actor.use_kl_loss = True
+        config.actor_rollout_ref.actor.kl_loss_coef = kl_coef
+    logger.info(
+        "Token-level OPD default enabled: actor.use_kl_loss=true, actor.kl_loss_coef=%s",
+        kl_coef,
     )
 
 
@@ -584,11 +563,11 @@ def build_role_worker_mapping(config):
     # Reference policy worker.
     # For OPSD with shared teacher params, ref_log_prob can be computed by the current actor,
     # so no standalone RefPolicy worker is needed unless other KL paths require it.
-    opsd_flags = _resolve_opsd_runtime_flags(config)
+    opsd_flags = resolve_opsd_runtime_flags(config)
     opsd_enabled = opsd_flags["opsd_enabled"]
     opsd_full_vocab_jsd_enabled = opsd_flags["opsd_full_vocab_jsd_enabled"]
     opsd_shared_teacher = opsd_flags["opsd_shared_teacher"]
-    _validate_opsd_full_vocab_jsd_config(config, **opsd_flags)
+    validate_opsd_full_vocab_jsd_config(config, **opsd_flags)
 
     if opsd_full_vocab_jsd_enabled and config.actor_rollout_ref.actor.strategy not in {
         "fsdp",
@@ -604,7 +583,7 @@ def build_role_worker_mapping(config):
             "⚠ full_vocab_jsd mode ignores actor_rollout_ref.actor.use_kl_loss=true."
         )
 
-    need_ref_policy_worker = _should_create_ref_policy_worker(config, **opsd_flags)
+    need_ref_policy_worker = should_create_ref_policy_worker(config, **opsd_flags)
     if need_ref_policy_worker:
         # Use the same actor rollout class for reference policy
         if config.actor_rollout_ref.actor.strategy in {"fsdp", "fsdp2"}:
@@ -784,16 +763,15 @@ class PPOTrainingServerBackend:
         self.use_rm = self.trainer.use_rm
         self.ref_in_actor = self.trainer.ref_in_actor
         self.async_rollout_mode = False  # Will be set after init_workers
-        opsd_cfg = self.config.algorithm.get("opsd", {})
-        self.opsd_enabled = bool(opsd_cfg.get("enable", False))
-        self.opsd_teacher_mode = str(opsd_cfg.get("teacher_mode", "fixed")).lower()
+        opsd_flags = resolve_opsd_runtime_flags(self.config)
+        self.opsd_enabled = opsd_flags["opsd_enabled"]
+        self.opsd_teacher_mode = opsd_flags["opsd_teacher_mode"]
         self.val_max_new_tokens = self.config.get("val_max_new_tokens", None)
         if self.val_max_new_tokens is not None:
             self.val_max_new_tokens = int(self.val_max_new_tokens)
+        opsd_cfg = self.config.algorithm.get("opsd", {})
         self.opsd_full_vocab_cfg = opsd_cfg.get("full_vocab_jsd", {})
-        self.opsd_full_vocab_jsd_enabled = bool(
-            self.opsd_full_vocab_cfg.get("enable", False)
-        )
+        self.opsd_full_vocab_jsd_enabled = opsd_flags["opsd_full_vocab_jsd_enabled"]
         self.opsd_distill_mode = str(
             self.opsd_full_vocab_cfg.get("distill_mode", "full_vocab_jsd")
         ).lower()
@@ -818,14 +796,7 @@ class PPOTrainingServerBackend:
         self.opsd_jsd_teacher_logits_cpu_offload = bool(
             self.opsd_full_vocab_cfg.get("teacher_logits_cpu_offload", True)
         )
-        if self.opsd_teacher_mode not in {"fixed", "shared"}:
-            raise ValueError(
-                f"Invalid algorithm.opsd.teacher_mode={self.opsd_teacher_mode!r}. "
-                "Expected one of: 'fixed', 'shared'."
-            )
-        self.opsd_shared_teacher = (
-            self.opsd_enabled and self.opsd_teacher_mode == "shared"
-        )
+        self.opsd_shared_teacher = opsd_flags["opsd_shared_teacher"]
 
         # KL control
         if self.config.algorithm.use_kl_in_reward:
@@ -1397,26 +1368,29 @@ class PPOTrainingServerBackend:
                     config=self.config.algorithm,
                 )
 
-                # Disable RL reward: zero out base advantages so only KL drives the update.
-                # Requires use_kl_in_advantage=True; effective formula: A_final = -α * KL
+                # Disable RL reward: zero out base advantages so only distillation terms drive updates.
+                # Requires use_kl_in_advantage=True or full-vocab JSD mode.
                 if self.config.algorithm.get("disable_rl_reward", False):
                     assert self.config.algorithm.get("use_kl_in_advantage", False) or self.opsd_full_vocab_jsd_enabled
                     # requires use_kl_in_advantage=True when disable_rl_reward=True
                     batch.batch["advantages"] = torch.zeros_like(batch.batch["advantages"])
                     batch.batch["returns"] = torch.zeros_like(batch.batch["returns"])
 
-                # On-policy distillation: add per-token KL penalty to advantage.
-                # A_final = A_base - α * (log π_student - log π_teacher)
-                # Works with any adv_estimator (grpo, gae, grpo_per_step, …).
+                # Token-level OPD teacher signal:
+                # A_teacher = log π_teacher(a_t|s+hint) - log π_student(a_t|s).
+                # Explicit KL regularization is applied separately by actor KL loss.
                 if self.config.algorithm.get("use_kl_in_advantage", False) and not self.opsd_full_vocab_jsd_enabled:
-                    kl_coef = self.config.algorithm.kl_ctrl.kl_coef
-                    batch = incorporate_kl_penalty_in_advantage(batch, kl_coef)
+                    batch = incorporate_teacher_signal_in_advantage(batch)
                     kl = (
                         (batch.batch["old_log_probs"] - batch.batch["ref_log_prob"])
                         * batch.batch["response_mask"]
                     )
                     metrics["distill/kl_per_token"] = kl.mean().item()
-                    metrics["distill/kl_coef"] = kl_coef
+                    metrics["distill/kl_coef"] = float(
+                        self.config.actor_rollout_ref.actor.get(
+                            "kl_loss_coef", self.config.algorithm.kl_ctrl.kl_coef
+                        )
+                    )
                 
             # 10. Update critic
             if self.use_critic:
@@ -2154,6 +2128,7 @@ async def override_config(request: ConfigOverrideRequest):
         override_cfg = OmegaConf.create(config_overrides)
         with open_dict(_server_cfg):
             _server_cfg = OmegaConf.merge(_server_cfg, override_cfg)
+        _apply_default_token_level_opd_config(_server_cfg)
 
         # DEBUG: Print paths after merge
         logger.info(

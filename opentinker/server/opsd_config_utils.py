@@ -66,7 +66,7 @@ def should_create_ref_policy_worker(
         return False
     return bool(
         config.algorithm.use_kl_in_reward
-        or config.actor_rollout_ref.actor.use_kl_loss
+        or (config.actor_rollout_ref.actor.use_kl_loss and not opsd_shared_teacher)
         or (
             config.algorithm.get("use_kl_in_advantage", False)
             and not opsd_shared_teacher

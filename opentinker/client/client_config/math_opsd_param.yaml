@@ -43,6 +43,8 @@ max_prompt_tokens: 4096
 
 # Rollout sampling count per prompt. Supports rollout_n > 1.
 rollout_n: 1
+# Enable dynamic batch sizing by default to avoid requiring fixed micro-batch settings.
+use_dynamic_bsz: true
 
 # Algorithm settings
 algorithm:
@@ -56,7 +58,7 @@ algorithm:
   # If false, train with RL + OPSD mixed objective.
   disable_rl_reward: false
 
-  # KL coefficient alpha used in: A_final = A_base - alpha * KL(student||teacher)
+  # External KL loss coefficient beta_kl (outside policy gradient).
   kl_penalty_coef: 0.1
 
   # OPSD explicit switch
