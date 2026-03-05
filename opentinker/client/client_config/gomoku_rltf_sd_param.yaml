@@ -1,0 +1,86 @@
+# Gomoku RLTF-SD Configuration (multi-turn)
+# Use with: python opentinker/client/gomoku_rl.py --config-name gomoku_rltf_sd_param
+
+project_name: opentinker
+experiment_name: gomoku_rltf_sd
+
+logger_backends: ["console", "wandb"]
+enable_tracing: true
+weave_project: null
+wandb_key: null
+
+tokenizer_path: null
+
+batch_size: 4
+num_workers: 4
+num_epochs: null
+num_steps: 1000
+save_freq: 20000
+test_freq: 10
+
+val_batch_size: 50
+
+temperature: 1
+top_p: 1
+max_new_tokens: 8192
+max_prompt_tokens: 4096
+
+algorithm: "agent_loop"
+adv_estimator: "grpo_per_step"
+rollout_n: 16
+use_dynamic_bsz: true
+
+server_overrides:
+  actor_rollout_ref:
+    rollout:
+      agent:
+        default_agent_loop: rltf_sd_agent
+  algorithm:
+    rltf_sd:
+      enable: true
+      use_stable_request_id: false
+      sd_coef: 1.0
+      gamma: 1.0
+      max_pairs_per_episode: 20
+      feedback:
+        gomoku:
+          endpoint: null
+          model: null
+          auto_pick_model: true
+          api_key: null
+          api_key_env: OPENAI_API_KEY
+          timeout: 30
+          acquire_timeout: 120
+          retries: 2
+          retry_backoff: 1.0
+          max_tokens: 256
+          enforce_json_response: true
+          max_concurrency: 2
+          temperature: 0.0
+          fail_fast: true
+
+interaction:
+  name: gomoku
+  class_path: opentinker.environment.gym_environment_interaction.GymEnvironmentInteraction
+  config:
+    env_host: 0.0.0.0
+    env_port: 8088
+    env_endpoint: http://${interaction.config.env_host}:${interaction.config.env_port}
+    max_steps: 81
+    max_total_steps: 39
+    max_initial_moves: 0
+    board_size: 9
+    observation_template: "{observation}"
+    empty_board_prob: 1.0
+
+multi_turn:
+  max_user_turns: ${interaction.config.max_total_steps}
+  max_assistant_turns: ${interaction.config.max_total_steps}
+  max_tokens_per_turn: 256
+  weave_project: null
+  experiment_name: "gomoku_rltf_sd_interaction"
+
+scheduler_url: "http://0.0.0.0:8780"
+scheduler_api_key: null
+
+num_gpus: 2

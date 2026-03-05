@@ -90,7 +90,9 @@ def main(args):
             save_freq=args.save_freq,
             test_freq=args.test_freq,
             verbose=True,
-            validate_before_training=True,
+            validate_before_training=bool(
+                getattr(args, "validate_before_training", True)
+            ),
             game_stats_client=game_stats,
         )
         print(f"Training completed! Metrics: {final_metrics}")

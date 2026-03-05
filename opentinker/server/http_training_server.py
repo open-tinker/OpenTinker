@@ -91,9 +91,11 @@ from opentinker.server.opsd_utils import (
 )
 from opentinker.server.opsd_config_utils import (
     resolve_opsd_runtime_flags,
+    resolve_rltf_sd_runtime_flags,
     should_create_ref_policy_worker,
     validate_opsd_full_vocab_jsd_config,
 )
+from opentinker.server.rltf_sd_utils import build_rltf_sd_training_batch
 
 
 # Configure logging
@@ -495,6 +497,62 @@ def _apply_default_token_level_opd_config(config):
     )
 
 
+def _apply_rltf_sd_kl_pure_constraints(config):
+    """Apply strict pure-KL constraints for RLTF-SD KL mode."""
+    rltf_flags = resolve_rltf_sd_runtime_flags(config)
+    if not (
+        rltf_flags["rltf_sd_enabled"] and rltf_flags["rltf_sd_loss_type"] == "kl"
+    ):
+        return
+
+    rltf_sd_cfg = config.algorithm.get("rltf_sd", {})
+    kl_cfg = rltf_sd_cfg.get("kl", {})
+    pure_only = bool(kl_cfg.get("pure_only", False))
+    strict_pure = bool(kl_cfg.get("strict_pure", True))
+    if not pure_only:
+        return
+
+    with open_dict(config):
+        if config.algorithm.rltf_sd.get("main_pg_coef", None) is None:
+            config.algorithm.rltf_sd.main_pg_coef = 0.0
+            logger.info(
+                "RLTF-SD pure-KL default: algorithm.rltf_sd.main_pg_coef=0.0"
+            )
+
+    if not strict_pure:
+        logger.warning(
+            "RLTF-SD pure-KL strict constraints disabled "
+            "(algorithm.rltf_sd.kl.strict_pure=false)."
+        )
+        return
+
+    conflicts = []
+    if bool(config.algorithm.get("use_kl_in_reward", False)):
+        conflicts.append("algorithm.use_kl_in_reward")
+    if bool(config.algorithm.get("use_kl_in_advantage", False)):
+        conflicts.append("algorithm.use_kl_in_advantage")
+    if bool(config.actor_rollout_ref.actor.get("use_kl_loss", False)):
+        conflicts.append("actor_rollout_ref.actor.use_kl_loss")
+
+    if conflicts:
+        logger.warning(
+            "RLTF-SD pure-KL strict mode overrides conflicting settings: %s",
+            ", ".join(conflicts),
+        )
+    if float(config.algorithm.rltf_sd.get("main_pg_coef", 0.0)) != 0.0:
+        logger.warning(
+            "RLTF-SD pure-KL strict mode overrides algorithm.rltf_sd.main_pg_coef "
+            "to 0.0 (got %s).",
+            config.algorithm.rltf_sd.get("main_pg_coef"),
+        )
+
+    with open_dict(config):
+        config.algorithm.use_kl_in_reward = False
+        config.algorithm.use_kl_in_advantage = False
+        config.actor_rollout_ref.actor.use_kl_loss = False
+        config.algorithm.rltf_sd.main_pg_coef = 0.0
+
+
 def build_role_worker_mapping(config):
     """Build role to worker class mapping"""
     from verl.trainer.ppo.ray_trainer import Role
@@ -567,6 +625,10 @@ def build_role_worker_mapping(config):
     opsd_enabled = opsd_flags["opsd_enabled"]
     opsd_full_vocab_jsd_enabled = opsd_flags["opsd_full_vocab_jsd_enabled"]
     opsd_shared_teacher = opsd_flags["opsd_shared_teacher"]
+    rltf_sd_flags = resolve_rltf_sd_runtime_flags(config)
+    rltf_sd_kl_fixed_teacher_enabled = rltf_sd_flags[
+        "rltf_sd_kl_fixed_teacher_enabled"
+    ]
     validate_opsd_full_vocab_jsd_config(config, **opsd_flags)
 
     if opsd_full_vocab_jsd_enabled and config.actor_rollout_ref.actor.strategy not in {
@@ -582,8 +644,20 @@ def build_role_worker_mapping(config):
         print(
             "⚠ full_vocab_jsd mode ignores actor_rollout_ref.actor.use_kl_loss=true."
         )
+    if rltf_sd_kl_fixed_teacher_enabled and config.actor_rollout_ref.actor.strategy not in {
+        "fsdp",
+        "fsdp2",
+    }:
+        raise NotImplementedError(
+            "algorithm.rltf_sd.loss_type=kl with algorithm.rltf_sd.kl.teacher_mode=fixed "
+            "currently supports FSDP/FSDP2 actor strategy only."
+        )
 
-    need_ref_policy_worker = should_create_ref_policy_worker(config, **opsd_flags)
+    need_ref_policy_worker = should_create_ref_policy_worker(
+        config,
+        **opsd_flags,
+        rltf_sd_kl_fixed_teacher_enabled=rltf_sd_kl_fixed_teacher_enabled,
+    )
     if need_ref_policy_worker:
         # Use the same actor rollout class for reference policy
         if config.actor_rollout_ref.actor.strategy in {"fsdp", "fsdp2"}:
@@ -601,6 +675,8 @@ def build_role_worker_mapping(config):
         print("✓ RefPolicy worker added to role_worker_mapping")
     elif opsd_enabled and opsd_full_vocab_jsd_enabled:
         print("✓ OPSD full_vocab_jsd mode: skip standalone RefPolicy worker")
+    elif rltf_sd_kl_fixed_teacher_enabled:
+        print("✓ RLTF-SD KL fixed-teacher mode: skip standalone RefPolicy worker")
     elif opsd_shared_teacher:
         print("✓ OPSD shared teacher mode: ref_log_prob will use current actor")
 
@@ -797,6 +873,98 @@ class PPOTrainingServerBackend:
             self.opsd_full_vocab_cfg.get("teacher_logits_cpu_offload", True)
         )
         self.opsd_shared_teacher = opsd_flags["opsd_shared_teacher"]
+
+        # RLTF-SD auxiliary update config (default-off, additive)
+        self.rltf_sd_cfg = self.config.algorithm.get("rltf_sd", {})
+        self.rltf_sd_enable = bool(self.rltf_sd_cfg.get("enable", False))
+        self.rltf_sd_loss_type = str(
+            self.rltf_sd_cfg.get("loss_type", "awr")
+        ).lower()
+        if self.rltf_sd_loss_type not in {"awr", "kl"}:
+            raise ValueError(
+                f"Unsupported algorithm.rltf_sd.loss_type={self.rltf_sd_loss_type!r}. "
+                "Expected one of: 'awr', 'kl'."
+            )
+        self.rltf_sd_main_pg_coef = float(self.rltf_sd_cfg.get("main_pg_coef", 1.0))
+        self.rltf_sd_sd_coef = float(self.rltf_sd_cfg.get("sd_coef", 1.0))
+        self.rltf_sd_gamma = float(self.rltf_sd_cfg.get("gamma", 1.0))
+        self.rltf_sd_max_pairs_per_episode = int(
+            self.rltf_sd_cfg.get("max_pairs_per_episode", 8)
+        )
+
+        self.rltf_sd_kl_cfg = self.rltf_sd_cfg.get("kl", {})
+        self.rltf_sd_kl_enable = bool(self.rltf_sd_kl_cfg.get("enable", False))
+        self.rltf_sd_kl_teacher_mode = str(
+            self.rltf_sd_kl_cfg.get("teacher_mode", "fixed")
+        ).lower()
+        self.rltf_sd_kl_distill_mode = str(
+            self.rltf_sd_kl_cfg.get("distill_mode", "topk_reverse_kl_tail")
+        ).lower()
+        self.rltf_sd_kl_topk = int(self.rltf_sd_kl_cfg.get("topk", 50))
+        self.rltf_sd_kl_beta = float(self.rltf_sd_kl_cfg.get("beta", 0.5))
+        self.rltf_sd_kl_coef = float(self.rltf_sd_kl_cfg.get("coef", 1.0))
+        self.rltf_sd_kl_vocab_chunk_size = int(
+            self.rltf_sd_kl_cfg.get("vocab_chunk_size", 4096)
+        )
+        self.rltf_sd_kl_token_chunk_size = int(
+            self.rltf_sd_kl_cfg.get("token_chunk_size", 0)
+        )
+        self.rltf_sd_kl_teacher_logits_cpu_offload = bool(
+            self.rltf_sd_kl_cfg.get("teacher_logits_cpu_offload", True)
+        )
+        self.rltf_sd_kl_pure_only = bool(self.rltf_sd_kl_cfg.get("pure_only", False))
+        self.rltf_sd_kl_strict_pure = bool(
+            self.rltf_sd_kl_cfg.get("strict_pure", True)
+        )
+
+        if self.rltf_sd_enable and self.rltf_sd_loss_type == "kl":
+            if self.rltf_sd_kl_teacher_mode not in {"fixed", "shared"}:
+                raise ValueError(
+                    f"Unsupported algorithm.rltf_sd.kl.teacher_mode={self.rltf_sd_kl_teacher_mode!r}. "
+                    "Expected one of: 'fixed', 'shared'."
+                )
+            if self.rltf_sd_kl_distill_mode not in {"full_vocab_jsd", "topk_reverse_kl_tail"}:
+                raise ValueError(
+                    f"Unsupported algorithm.rltf_sd.kl.distill_mode={self.rltf_sd_kl_distill_mode!r}. "
+                    "Expected one of: 'full_vocab_jsd', 'topk_reverse_kl_tail'."
+                )
+            if (
+                self.rltf_sd_kl_distill_mode == "topk_reverse_kl_tail"
+                and self.rltf_sd_kl_topk <= 0
+            ):
+                raise ValueError(
+                    f"algorithm.rltf_sd.kl.topk must be > 0, got {self.rltf_sd_kl_topk}"
+                )
+            if not self.rltf_sd_kl_enable:
+                raise ValueError(
+                    "algorithm.rltf_sd.loss_type=kl requires algorithm.rltf_sd.kl.enable=true."
+                )
+        if (
+            self.rltf_sd_enable
+            and self.rltf_sd_loss_type == "kl"
+            and self.rltf_sd_kl_pure_only
+            and self.rltf_sd_kl_strict_pure
+        ):
+            conflicts = []
+            if bool(self.config.algorithm.get("use_kl_in_reward", False)):
+                conflicts.append("algorithm.use_kl_in_reward")
+            if bool(self.config.algorithm.get("use_kl_in_advantage", False)):
+                conflicts.append("algorithm.use_kl_in_advantage")
+            if bool(self.config.actor_rollout_ref.actor.get("use_kl_loss", False)):
+                conflicts.append("actor_rollout_ref.actor.use_kl_loss")
+            if conflicts:
+                raise ValueError(
+                    "RLTF-SD pure-KL strict mode conflicts with: "
+                    + ", ".join(conflicts)
+                )
+
+        if self.rltf_sd_enable and self.config.actor_rollout_ref.actor.strategy not in {
+            "fsdp",
+            "fsdp2",
+        }:
+            raise NotImplementedError(
+                "algorithm.rltf_sd currently supports FSDP/FSDP2 actor strategy only."
+            )
 
         # KL control
         if self.config.algorithm.use_kl_in_reward:
@@ -1080,6 +1248,48 @@ class PPOTrainingServerBackend:
                 )
                 else 0.0
             )
+            if self.rltf_sd_enable:
+                metrics["rltf_sd/pair_count"] = 0.0
+                metrics["rltf_sd/b0_mean"] = 0.0
+                metrics["rltf_sd/adv_mean"] = 0.0
+                metrics["rltf_sd/loss"] = 0.0
+                metrics["rltf_sd/kl_loss"] = 0.0
+                metrics["rltf_sd/main_pg_coef"] = float(self.rltf_sd_main_pg_coef)
+                metrics["rltf_sd/loss_type_awr"] = float(
+                    self.rltf_sd_loss_type == "awr"
+                )
+                metrics["rltf_sd/loss_type_kl"] = float(
+                    self.rltf_sd_loss_type == "kl"
+                )
+                metrics["rltf_sd/kl_distill_mode_full_vocab_jsd"] = float(
+                    self.rltf_sd_loss_type == "kl"
+                    and self.rltf_sd_kl_distill_mode == "full_vocab_jsd"
+                )
+                metrics["rltf_sd/kl_distill_mode_topk_reverse_kl_tail"] = float(
+                    self.rltf_sd_loss_type == "kl"
+                    and self.rltf_sd_kl_distill_mode == "topk_reverse_kl_tail"
+                )
+                metrics["rltf_sd/kl_topk"] = (
+                    float(self.rltf_sd_kl_topk)
+                    if (
+                        self.rltf_sd_loss_type == "kl"
+                        and self.rltf_sd_kl_distill_mode == "topk_reverse_kl_tail"
+                    )
+                    else 0.0
+                )
+                metrics["rltf_sd/kl_beta"] = (
+                    float(self.rltf_sd_kl_beta)
+                    if (
+                        self.rltf_sd_loss_type == "kl"
+                        and self.rltf_sd_kl_distill_mode == "full_vocab_jsd"
+                    )
+                    else 0.0
+                )
+                metrics["rltf_sd/kl_coef"] = (
+                    float(self.rltf_sd_kl_coef)
+                    if self.rltf_sd_loss_type == "kl"
+                    else 0.0
+                )
 
             # 1. Prepare generation batch
             start_time = time.time()
@@ -1391,6 +1601,15 @@ class PPOTrainingServerBackend:
                             "kl_loss_coef", self.config.algorithm.kl_ctrl.kl_coef
                         )
                     )
+
+                # Keep the main actor update path but allow scaling/removing PG gradients.
+                # In pure RLTF-KL mode, this is typically set to 0.0.
+                if self.rltf_sd_enable:
+                    if self.rltf_sd_main_pg_coef != 1.0:
+                        batch.batch["advantages"] = (
+                            batch.batch["advantages"] * float(self.rltf_sd_main_pg_coef)
+                        )
+                    metrics["rltf_sd/main_pg_coef"] = float(self.rltf_sd_main_pg_coef)
                 
             # 10. Update critic
             if self.use_critic:
@@ -1427,6 +1646,46 @@ class PPOTrainingServerBackend:
                         actor_output.meta_info["metrics"]
                     )
                     metrics.update(actor_output_metrics)
+
+                if self.rltf_sd_enable:
+                    sd_batch, sd_stats = build_rltf_sd_training_batch(
+                        batch=batch,
+                        tokenizer=self.tokenizer,
+                        prompt_length=int(
+                            self.config.actor_rollout_ref.rollout.prompt_length
+                        ),
+                        response_length=int(
+                            self.config.actor_rollout_ref.rollout.response_length
+                        ),
+                        sd_coef=self.rltf_sd_sd_coef,
+                        gamma=self.rltf_sd_gamma,
+                        max_pairs_per_episode=self.rltf_sd_max_pairs_per_episode,
+                        temperature=float(
+                            self.config.actor_rollout_ref.rollout.temperature
+                        ),
+                        loss_type=self.rltf_sd_loss_type,
+                        kl_enable=self.rltf_sd_kl_enable,
+                        kl_teacher_mode=self.rltf_sd_kl_teacher_mode,
+                        kl_distill_mode=self.rltf_sd_kl_distill_mode,
+                        kl_topk=self.rltf_sd_kl_topk,
+                        kl_beta=self.rltf_sd_kl_beta,
+                        kl_coef=self.rltf_sd_kl_coef,
+                        kl_vocab_chunk_size=self.rltf_sd_kl_vocab_chunk_size,
+                        kl_token_chunk_size=self.rltf_sd_kl_token_chunk_size,
+                        kl_teacher_logits_cpu_offload=self.rltf_sd_kl_teacher_logits_cpu_offload,
+                    )
+                    metrics["rltf_sd/pair_count"] = float(sd_stats["pair_count"])
+                    metrics["rltf_sd/b0_mean"] = float(sd_stats["b0_mean"])
+                    metrics["rltf_sd/adv_mean"] = float(sd_stats["adv_mean"])
+                    if sd_batch is not None:
+                        with marked_timer(
+                            "update_actor_rltf_sd", timing_raw, color="magenta"
+                        ):
+                            sd_output = self.actor_rollout_wg.update_actor_rltf_sd(
+                                sd_batch
+                            )
+                            sd_metrics = reduce_metrics(sd_output.meta_info["metrics"])
+                            metrics.update(sd_metrics)
 
             # 12. Update global steps
             self.global_steps += 1
@@ -2129,6 +2388,7 @@ async def override_config(request: ConfigOverrideRequest):
         with open_dict(_server_cfg):
             _server_cfg = OmegaConf.merge(_server_cfg, override_cfg)
         _apply_default_token_level_opd_config(_server_cfg)
+        _apply_rltf_sd_kl_pure_constraints(_server_cfg)
 
         # DEBUG: Print paths after merge
         logger.info(

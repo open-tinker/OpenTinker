@@ -401,13 +401,27 @@ class RayPPOTrainer:
         opsd_cfg = self.config.algorithm.get("opsd", {})
         opsd_full_vocab_cfg = opsd_cfg.get("full_vocab_jsd", {})
         self.opsd_full_vocab_jsd_enabled = bool(opsd_full_vocab_cfg.get("enable", False))
+        rltf_sd_cfg = self.config.algorithm.get("rltf_sd", {})
+        rltf_sd_enable = bool(rltf_sd_cfg.get("enable", False))
+        rltf_sd_loss_type = str(rltf_sd_cfg.get("loss_type", "awr")).lower()
+        rltf_sd_kl_cfg = rltf_sd_cfg.get("kl", {})
+        rltf_sd_kl_enable = bool(rltf_sd_kl_cfg.get("enable", False))
+        rltf_sd_kl_teacher_mode = str(
+            rltf_sd_kl_cfg.get("teacher_mode", "fixed")
+        ).lower()
+        self.rltf_sd_kl_fixed_teacher_enabled = bool(
+            rltf_sd_enable
+            and rltf_sd_loss_type == "kl"
+            and rltf_sd_kl_enable
+            and rltf_sd_kl_teacher_mode == "fixed"
+        )
 
         # if ref_in_actor is True, the reference policy will be actor without lora applied
         self.ref_in_actor = (
             config.actor_rollout_ref.model.get("lora_rank", 0) > 0
             or config.actor_rollout_ref.model.get("lora_adapter_path") is not None
         )
-        if self.opsd_full_vocab_jsd_enabled:
+        if self.opsd_full_vocab_jsd_enabled or self.rltf_sd_kl_fixed_teacher_enabled:
             self.ref_in_actor = True
 
         # define in-reward KL control
@@ -880,7 +894,10 @@ class RayPPOTrainer:
             )
             actor_role = (
                 str(Role.ActorRolloutRef)
-                if self.opsd_full_vocab_jsd_enabled
+                if (
+                    self.opsd_full_vocab_jsd_enabled
+                    or self.rltf_sd_kl_fixed_teacher_enabled
+                )
                 else str(Role.ActorRollout)
             )
             actor_rollout_cls = RayClassWithInitArgs(

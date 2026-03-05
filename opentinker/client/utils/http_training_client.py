@@ -139,9 +139,12 @@ class HTTPTrainingClient:
 
         if isinstance(config, DictConfig):
             assert env_config is not None, "Env config must be provided to set_config"
+            # Merge env defaults first, then user/client config so explicit
+            # server_overrides (e.g. default_agent_loop) are not clobbered by
+            # environment defaults from BaseGameEnvironment.get_config().
             config = OmegaConf.merge(
-                config,
                 OmegaConf.create(env_config),
+                config,
             )
 
         config_payload = OmegaConf.to_container(config, resolve=True)
@@ -655,6 +658,17 @@ class ServiceClient:
             print(
                 f"[ServiceClient] Overriding agent num_workers to: {agent_num_workers}"
             )
+
+        # Optional low-level server overrides (additive; backward-compatible when absent)
+        server_overrides = getattr(args, "server_overrides", None)
+        if server_overrides:
+            server_cfg = OmegaConf.merge(
+                server_cfg,
+                OmegaConf.create(
+                    OmegaConf.to_container(server_overrides, resolve=True)
+                ),
+            )
+            print("[ServiceClient] Applied server_overrides")
 
         generation_config = {
             "temperature": args.temperature,

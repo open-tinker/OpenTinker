@@ -1,0 +1,109 @@
+# Math RLTF-SD Pure-KL Configuration (single-turn)
+# Use with: python opentinker/client/math_rl.py --config-name math_rltf_sd_kl_param
+
+project_name: opentinker
+experiment_name: math_rltf_sd_kl
+
+logger_backends: ["console", "wandb"]
+enable_tracing: true
+weave_project: null
+wandb_key: null
+
+tokenizer_path: null
+
+data_path: null
+val_data_path: null
+
+batch_size: 64
+num_workers: 0
+num_epochs: 10
+num_steps: null
+save_freq: 100
+test_freq: 5
+validate_before_training: true
+
+val_batch_size: 30
+
+temperature: 0.7
+top_p: 1
+max_new_tokens: 4098
+max_prompt_tokens: 4096
+
+algorithm: "agent_loop"
+adv_estimator: "grpo"
+rollout_n: 1
+use_dynamic_bsz: true
+
+lora:
+  lora_rank: 0
+  lora_alpha: 16
+  target_modules: "all-linear"
+  exclude_modules: null
+  lora_adapter_path: null
+
+# Additional server-side overrides (additive, keeps existing client interface unchanged)
+server_overrides:
+  actor_rollout_ref:
+    rollout:
+      agent:
+        default_agent_loop: rltf_sd_agent
+  algorithm:
+    rltf_sd:
+      enable: true
+      loss_type: "kl"
+      main_pg_coef: 0.0
+      use_stable_request_id: false
+      sd_coef: 1.0
+      gamma: 1.0
+      max_pairs_per_episode: 1
+      kl:
+        enable: true
+        teacher_mode: "fixed"
+        distill_mode: "topk_reverse_kl_tail"
+        topk: 50
+        beta: 0.5
+        coef: 1.0
+        vocab_chunk_size: 1024
+        token_chunk_size: 64
+        teacher_logits_cpu_offload: true
+        pure_only: true
+        strict_pure: true
+      feedback:
+        math:
+          endpoint: null
+          # Optional. Some reviewer endpoints can infer a default model.
+          model: null
+          auto_pick_model: true
+          api_key: null
+          api_key_env: OPENAI_API_KEY
+          timeout: 60000
+          acquire_timeout: 12000
+          retries: 2
+          retry_backoff: 1.0
+          max_tokens: 2048
+          enforce_json_response: true
+          max_concurrency: 16
+          pool_maxsize: 64
+          temperature: 0.5
+          fail_fast: true
+
+interaction:
+  name: math
+  class_path: opentinker.environment.gym_environment_interaction.GymEnvironmentInteraction
+  config:
+    env_host: 0.0.0.0
+    env_port: 8088
+    env_endpoint: http://${interaction.config.env_host}:${interaction.config.env_port}
+    max_steps: 1
+
+multi_turn:
+  max_user_turns: 0
+  max_assistant_turns: 1
+  max_tokens_per_turn: 4096
+  weave_project: null
+  experiment_name: "math_rltf_sd_kl_interaction"
+
+scheduler_url: "http://0.0.0.0:8780"
+scheduler_api_key: null
+
+num_gpus: 4
