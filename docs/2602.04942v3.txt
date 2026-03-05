@@ -1,0 +1,4220 @@
+Privileged Information Distillation
+for Language Models
+Emiliano Penaloza1,2,3 , Dheeraj Vattikonda1,2,4 , Nicolas Gontier1 ,
+Alexandre Lacoste1 , Laurent Charlin2,5 , Massimo Caccia1
+ServiceNow, 2 Mila Quebec, 3 Université de Montréal, 4 McGill University, 5 HEC Montréal
+
+Training-time privileged information (PI) can enable language models to succeed on tasks they would
+otherwise fail, making it a powerful tool for Reinforcement Learning (RL) in hard, long-horizon settings.
+However, transferring capabilities learned with PI to policies that must act without it at inference time
+remains a fundamental challenge. We study this problem in the context of distilling frontier models for
+multi-turn agentic environments, which typically hide their internal reasoning and expose only action
+trajectories. This breaks standard distillation pipelines, since successful behavior is observable, but
+the reasoning process is not. For this, we introduce π-Distill, a joint teacher-student objective that
+trains a PI-conditioned teacher and an unconditioned student simultaneously using the same model.
+Additionally, we also introduce On-Policy Self-Distillation (OPSD), an alternative approach that trains
+using RL with a reverse KL-penalty between the student and the PI-conditioned teacher. We show
+that both of these algorithms effectively distill frontier agents using action-only PI. Specifically, we
+find that π-Distill and, in some cases, OPSD, outperform industry standard practices (Supervised
+finetuning followed by RL) that assume access to full Chain-of-Thought supervision across multiple
+agentic benchmarks, models, and forms of PI. We complement our results with extensive analysis
+that characterizes the factors enabling effective learning with PI, focusing primarily on π-Distill and
+characterizing when OPSD is competitive.
+Correspondence: emilianopp550@gmail.com
+
+Tools + User Message
+Privileged Information
+1) Frontier Model Tool Call 1
+2) Frontier Model Tool Call 2
+3) ...
+Thinking 1
+
+τ-Bench
+
+Remove Privileged
+Information
+
+Student Data
+Tools + User Message
+
+Score (%)
+
+Teacher Trajectories
+
+Teacher Thinking 1
+
+30
+
+20
+
+T+
+
+/ CO
+
+Teacher Tool Call 1
+
+w
+SFT
+
+...
+
+50
+
+RL
+
+T
+
+1)
+(=
+
+S
+
+0)
+5)
+till
+( = T ( =0. elf Dis
+S+
+
+S
+
+Travel Planner
+
+RL
+w/o
+SFT
+
+COT
+
+L
+
++R
+
+Tool Call 1
+
+Score (%)
+
+arXiv:2602.04942v3 [cs.LG] 16 Feb 2026
+
+1
+
+...
+
+40
+30
+20
+
+T+
+
+/ CO
+
+w
+SFT
+
+Figure 1 Overview of the π-Distill framework. (1) Successful trajectories (not shown) are collected from a frontier agent that exposes
+only actions while hiding its Chain-of-Thought. (2) These trajectories are transformed into training-time privileged information (PI) and
+used to sample using a PI-conditioned teacher policy πθT (o | s, I). (3)
+The PI-conditioned teacher and an unconditioned student πθS (o|s) share
+parameters and are trained jointly, enabling transfer of privileged knowledge to a test-time policy that acts without PI.
+
+1
+
+RL
+
+T
+
+1)
+(=
+
+S
+
+0)
+5)
+till
+( = T ( =0. elf Dis
+S+
+
+S
+
+RL
+
++
+OT
+
+/o C
+
+w
+SFT
+
+RL
+
+Figure 2 Results for Qwen3-8B on TravelPlanner and τ -Bench retail. The dashed
+line separating SFT w/ CoT + RL denotes
+that this method is not a required baseline, as all other methods do not rely on
+frontier-model CoT traces. We find that
+both π-Distill and OPSD substantially outperform all baselines in this setting.
+
+1
+
+Introduction
+
+Language Models (LMs) have the unique ability to converse, which provides a superior user interface and more
+straightforward interactions than other machine learning systems. Crafting good prompts, or equivalently,
+conditioning on the right context, remains essential to obtain the best possible performance from an LM.
+This raises the question of whether LMs can learn from informative prompts to generalize to less informative
+prompts. In other words, how can an LM learn to transfer training-time privileged information (PI) (Vapnik
+& Vashist, 2009) to test tasks (that do not contain PI)?
+Training-time PI can be particularly useful for Reinforcement Learning (RL) with LMs, where learning is
+contingent on the model’s ability to first succeed on a task (Yue et al., 2025). That is, the model can leverage
+train-time PI to succeed at tasks it would otherwise fail, effectively enabling it to bootstrap its learning from
+these successful experiences. As noted above, the underlying challenge is transfer: training a model with PI
+and obtaining a test-time policy that retains those enhanced capabilities without PI.
+In this work, we show that leveraging train-time PI is highly effective under certain conditions. For instance,
+conditioning a policy on PI can drastically shift the sampling distribution away from the unconditioned one,
+making transfer significantly harder. Additionally, we find that non-frontier models often struggle to accurately
+leverage PI and must explicitly learn to use it. To enable effective training in this setting, we introduce two
+complementary distillation objectives: Privileged Information Distillation (π-Distill), our main method, and
+On-Policy Self-Distillation (OPSD), an on-policy alternative. π-Distill adapts the typical teacher-student setup
+by using a single shared-parameter model in which the teacher has access to PI. Importantly, π-Distill trains the
+teacher and student jointly, enabling the teacher to learn how to use PI while actively mitigating distribution
+shift during transfer. OPSD similarly allows the teacher and student to share parameters, regularizing on-policy
+RL with a reverse KL penalty between the student and a PI-conditioned teacher.
+We ground our work in the task of distilling frontier models for complex multi-turn agentic settings. Typically,
+the industry standard for these tasks involves Supervised Fine-Tuning (SFT) on frontier model outputs
+followed by Reinforcement Learning (RL). Unfortunately, some model providers restrict important information,
+most notably the model’s full Chain-of-Thought (CoT) reasoning traces (OpenAI et al., 2024), providing only
+a summary alongside the action they intend to take. This opacity undermines standard distillation methods,
+as we can observe what successful agents do but not how they reason about it.
+We find that π-Distill is highly effective at mitigating the lack of CoT, outperforming industry standards
+that assume full CoT access, with this holding for OPSD in some cases. We demonstrate this on two agentic
+tool-use environments, Travel Planner (Xie et al., 2024) and τ -Bench retail (Yao et al., 2024), while showing
+proficient Out-of-Domain generalization on the 7 tool-use environments provided by GEM (Liu et al., 2025b)
+and τ -Bench airline. Our findings are consistent across three models from two distinct families.
+Finally, we transform frontier model trajectories into three varying types of PI, each with different information
+density, providing varying amounts of utility and inducing different degrees of distributional shift between
+student and teacher. We use this variation to analyze the critical factors for training with PI, finding that for
+π-Distill, maximizing PI utility while simultaneously mitigating the student-teacher distributional gap and
+preventing collapse is essential for effective learning. While information content is more important for OPSD.
+Contributions
+1. Algorithms for Privileged Information: We introduce π-Distill and On-Policy Self-Distillation
+(OPSD), two methods for training policies using train-time privileged information.
+2. Distilling without CoT: We show that our methods effectively distill frontier models using actions
+alone, bypassing the need for frontier model CoT traces. Notably, π-Distill consistently outperforms
+standard SFT+RL baselines that rely on full Chain-of-Thought data.
+3. Generalization: We demonstrate significant gains over baselines on τ -Bench and Travel Planner,
+with strong generalization to eight additional out-of-distribution (OOD) on GEM tool-use tasks.
+
+2
+
+2
+
+Background
+
+Agentic Interaction as an MDP. We formalize long-horizon, multi-turn agentic environments as a Markov
+Decision Process (MDP). In this setting, a policy πθ (· | s) interacts with an environment over extended
+sequences of actions. To simplify notation, we let s represent the evolving interaction context, which aggregates
+all information available to the model at a given point: the initial user prompt, the model’s past outputs, and
+all environment responses. As the agent acts, the context updates via a transition function st+1 ∼ P (· | st , ot ),
+where the environment appends its response to the current sequence to form the next state. As s encapsulates
+the interaction history, we use the following to simplify notation:
+πθ (o | s) =
+
+T
+Y
+
+πθ (zi , ai | s<i )
+
+i=0
+
+where o = (z, a) consists of reasoning tokens z and action tokens a.
+Reinforcement learning. RL seeks to maximize the expected return obtained through interaction with an
+environment (Sutton et al., 1999):
+h
+i
+J(πθ ) = Eo∼πθ (·|s) R(o, s) .
+s∼P
+
+Here, R(o, s) ∈ [−1, 1] denotes the reward assigned by the environment to the generated trajectory.
+Policy Optimization. We optimize J(πθ ) using Group Relative Policy Optimization (GRPO) (Shao et al.,
+2024; DeepSeek-AI et al., 2025), with the adjustments recommended by Yu et al. (2025) and Liu et al. (2025a).
+For each state si , we sample a group of G trajectories {og }G
+g=1 according to the current sampling policy µ
+and the transition function P . For each token k in trajectory g, we define the token-level importance ratio:
+ρg,k (θ) =
+
+πθ (og,k | si , og,<k )
+.
+µ(og,k | si , og,<k )
+
+We define a group-relative advantage As,g by comparing the return of trajectory g to the average return of the
+sampled group, and use it to scale clipped importance-weighted policy updates. The GRPO objective then is:
+#
+"
+
+
+X
+1
+min ρg,k As,g , clip(ρg,k , 1−ϵ, 1+ϵ)As,g
+(1)
+JGRPO (θ) = Eo∼πθ (·|s) P
+s∼P
+g Kg
+g,k
+
+where Kg is the length of trajectory g in tokens and ϵ is the clipping parameter. While the original GRPO
+objective typically employs a KL-penalty with respect to the base model, we drop this term as recent work
+shows it can hinder performance (Shah et al., 2026).
+
+3
+
+Methods
+
+In this section, we introduce and motivate two algorithms for leveraging PI during training. Both methods
+use a teacher–student framework inspired by traditional distillation. However, the teacher and student share
+parameters, and only the teacher is conditioned on PI.
+Privileged Information Distillation (π-Distill) learns from teacher-generated traces by jointly improving both
+the teacher and the student. In contrast, on-policy self-distillation (OPSD) 1 samples trajectories from the
+student policy and uses a reverse KL divergence between the student and the PI-conditioned teacher as a
+training penalty. Both algorithms are derived using a variational perspective, which we outline in detail in
+App. A and App. B.
+1We adopt the naming ”self-distillation” following concurrent work (Shenfeld et al., 2026; Zhao et al., 2026; Hübotter et al.,
+2026) that propose the same objective.
+
+3
+
+3.1
+
+Privileged Information Distillation (π-Distill)
+
+Motivation A straightforward way to use PI for distillation is to condition a policy on PI to generate
+successful trajectories, which are then used for fine-tuning. However, this approach has two key limitations.
+First, base models do not automatically know how to exploit PI (see section 7), needing to learn how to use it,
+before providing benefit. Second, even once the policy can exploit PI, we still need to transfer this behavior
+to a policy that must act without PI at test time.
+A naive solution is to first train a PI-conditioned policy and then distill its behavior into an unconditioned one.
+In practice, this sequential pipeline introduces several issues. It is unclear which checkpoint of the conditioned
+policy should be distilled, learning from its trajectories is off-policy and can be unstable, and training the
+two policies separately is computationally inefficient. Our early experiments confirm that this setup leads to
+suboptimal performance (see figure 11).
+To address these challenges, we propose Privileged Information Distillation (π-Distill), which trains both
+policies jointly within a single parameter-shared model. This allows the model to learn to exploit PI while
+simultaneously learning to act without it.
+Algorithm. Our approach uses a single model with shared parameters θ that acts as both a teacher πθT (o | s, I)
+(conditioned on PI I) and a student πθS (o|s) (operating without PI). We train both simultaneously using
+two objectives. The teacher objective trains the conditioned policy to maximize reward while maintaining
+proximity to the student policy:
+h
+i
+
+
+
+JTeacher (θ) = Eo∼πT (o|s,I) R(o, s) − βDKL πθT (o | s, I) ∥ sg πθS (o|s) .
+θ
+
+(2)
+
+s∼P
+
+This objective samples trajectories from the teacher policy and updates it to increase reward while subject to
+a reverse KL penalty DKL πθT ∥ πθS controlled by β, where sg(.) indicates the stop gradient operator. This
+objective serves two purposes: (i) it encourages the teacher to fit high-reward modes familiar to the student,
+making learning from its traces easier, and (ii) shared parameters promote transfer of the teacher’s knowledge
+to the student, even without directly training the student.
+The student objective trains the unconditioned policy to learn from the teacher’s trajectories:
+JStudent (θ) = Eo∼πθT (o|s,I)
+s∼P
+
+h
+
+i
+
+
+πθS (o|s)
+ R(o, s) − βDKL sg πθT (o | s, I) ∥ πθS (o|s) .
+T
+sg πθ (o | s, I)
+
+(3)
+
+This objective samples trajectories from the teacher (which has access to PI) but updates the student policy
+(which does not). This teaches the student to replicate the teacher’s high-reward behavior without needing PI.
+Combining the student and teacher terms gives us our final objective:
+Jπ-Distill (θ) = αJTeacher (θ) + (1 − α)JStudent (θ),
+
+(4)
+
+where α ∈ [0, 1] controls the balance between student and teacher focused learning.
+When α = 1, optimization focuses entirely on the teacher, although the student may still improve through
+shared parameters. When α = 0, training is focused on student learning from the teacher’s current behavior.
+Where, we observe that under certain conditions, parameter sharing can still lead to improvements in the
+teacher without explicit teacher updates. When α = 0.5, both are optimized jointly. Shared parameters allow
+representations learned for using PI to transfer to the student, while student updates keep those representations
+effective without PI. The full algorithm is given in algorithm 1.
+Connection to Variational EM. This approach can be viewed as a form of Variational ExpectationMaximization (EM), where one uses an approximate posterior π T to approximate a target distribution π ∗ .
+Here the E-step first improves π T and the M-step distills this into the student policy π S . Traditionally this
+can be trained sequentially or in alternating loops with separate models (see Zhou et al. (2025)). We discuss
+this connection more in depth in App. A.1 and App. A.2, characterizing the target distribution π ∗ , derive
+π-Distill from this perspective and compare against sequential setups (similar to Zhou et al. (2025)).
+4
+
+3.2
+
+On-Policy Self Distillation
+
+Motivation. π-Distill can be viewed as off-policy learning, where the student is trained on trajectories
+generated by the PI-conditioned teacher. A complementary line of work studies on-policy distillation, in
+which the student acts as the sampling policy and knowledge is transferred by minimizing the reverse KL
+between the student and teacher (Agarwal et al., 2024; Yang et al., 2026). Prior work typically utilizes a
+larger model as the teacher. We introduce this objective in our PI setting by instantiating it with the same
+shared-parameter model, where the teacher is additionally conditioned on PI. We refer to this objective as
+On-Policy Self-Distillation (OPSD).
+Algorithm.
+
+The above intuition yields the following objective:
+h
+i
+
+JOPSD (θ) = Eo∼πS (o|s) R(o, s) − β DKL πθS (o|s) ∥ sg πθT (o | s, I) .
+θ
+
+(5)
+
+s∼P
+
+Note that the updates are on-policy as the expectation is taken over π S . Where the reverse KL acts as a
+dense per-token reward measuring how closely the student matches the teacher. The full algorithm is given in
+algorithm 2. We analyze OPSD in greater depth in App B and characterize the specific target distribution
+that the algorithm implicitly fits. Concurrent work also propose this objective, demonstrating its effectiveness
+in settings such as having access to ground truth answers (Zhao et al., 2026), conditioning on reflective
+self-feedback (Hübotter et al., 2026), and continual learning (Shenfeld et al., 2026). In this work, we introduce
+and evaluate OPSD for PI transfer without ground truth and characterize it across a variety of PI types,
+identifying settings in which it fails.
+
+4
+
+Experimental Setting
+
+While learning with PI is applicable to many settings, we ground our work in the task of distilling frontier
+models within multi-turn tool-calling environments. We focus on this domain for two primary reasons. First,
+non-frontier models often lack the capabilities required for such settings, whereas frontier models demonstrate
+proficient performance (Singh et al., 2025; Team et al., 2025). Consequently, weaker models struggle to
+independently sample successful trajectories, making the PI derived from a frontier model’s actions highly
+valuable. Second, frontier models typically occlude their CoT reasoning (OpenAI et al., 2024). This renders
+standard distillation methods infeasible, a gap our proposed algorithms are designed to fill.
+
+4.1
+
+Benchmarks
+
+To evaluate our approach, we first employ τ -Bench (Yao et al., 2024), which simulates customer service
+interactions where agents book flights (airline domain) or assist shoppers (retail domain) by calling tools
+and gathering user information. To reduce computational costs, we substitute the GPT-4o user simulator
+with Qwen-14B. The most substantial change is that we remove the transfer_to_human_agents tool, as
+it consistently led to reward hacking. The resulting dataset consists of 500 training tasks restricted to
+the retail domain; we evaluate on 115 held-out retail tasks and 50 airline tasks, utilizing the latter to test
+Out-Of-Domain (OOD) generalization. Next, we utilize Travel Planner (Xie et al., 2024), a benchmark
+focusing on tool use for planning. While the original repository2 employs a rubric-based evaluation that
+prioritizes "easy" constraints before checking "hard" ones, we found this setup causes policies to collapse
+onto undesired behaviors (see App. G). To address this, we decouple the rewards so that easy constraints are
+tied directly to their corresponding hard constraints, for example, verifying dietary restrictions immediately
+after booking a restaurant. We train on the 45 training tasks and report results on the 180 publicly available
+held-out tasks. Finally, to probe whether training on these environments enhances tool usage to scopes far
+beyond the training domains, we evaluate on the GEM QA multi-turn tool-usage environment suite (Liu et al.,
+2025b). This suite equips agents with a search tool consisting of seven environments (2Wiki (Ho et al., 2020),
+PopQA (Mallen et al., 2022), TriviaQA (Joshi et al., 2017), HotpotQA (Yang et al., 2018), Bamboogle (Press
+et al., 2023), NaturalQuestions (Kwiatkowski et al., 2019), and Musique (Trivedi et al., 2022)).
+2 https://github.com/OSU-NLP-Group/TravelPlanner
+
+5
+
+4.2
+
+Sources of Privileged Information
+
+To show the benefits of leveraging train-time PI, we aim to distill a frontier model using only its raw output
+trajectories. For this, we mine trajectories from DeepSeek-chat-v3.1 as it is open-source and allows access to
+its reasoning tokens. Having access to these tokens allows us to benchmark against standard settings that
+assume access to CoT. This is an important detail, as baselines that assume access to this information should
+act as a soft-upper bound.
+Types of Privileged Information. We transform
+the raw trajectories into three distinct forms of PI
+to analyze how varying information density impacts
+performance.
+
+Frontier Model Traces
+Tools + User Message
+Frontier Model Thinking 1
+
+1. Tool calls & arguments. The complete sequence
+of actions executed by the frontier model, including function names and input arguments, e.g. GetUserDetails(Name:"Kevin Lau").
+
+Frontier Model Tool Call 1:
+id_by_email("joe@gmail.com")
+Tool Response: id = 3
+Frontier Model Thinking 2
+
+2. Tool calls only. We provide only the function
+names like GetUserDetails and require the model
+to infer the correct arguments from the context.
+3. Self-generated hints. We prompt the trained
+model to summarize a successful trajectory produced by the frontier model. This process can help
+filter inefficient actions and suggest ways to improve upon the expert’s behavior (see App. H.3 for
+an example).
+
+Frontier Model Tool Call 1:
+get_order(id=3)
+...
+
+Privileged Information( )
+Tool Calls & Arguments
+1)id_by_email("joe@mail.com")
+2)get_order(id=3)
+3)...
+Tool Calls
+1)id_by_email
+2)get_order
+3)...
+Self - Generated
+Look up the user id from the
+email, then use it to
+retrieve the user’s order
+details.
+Then...
+
+Figure 3 Deriving PI from frontier model traces. The left
+panel illustrates sampling trajectories from a frontier model,
+where full CoT reasoning is occluded (OpenAI et al., 2024).
+We transform these raw traces into three types of PI with
+varying information density: (1) Tool Calls & Arguments,
+retaining the exact actions invoked by the frontier model;
+(2) Tool Calls Only, where arguments are stripped; and (3)
+Self-Generated Hints, where the student model summarizes
+the frontier trajectory into a concise hint.
+
+Leveraging these three formats enables us to identify what properties allow successful transfer between teacher and student. We analyze this in
+section 7, finding that the optimal configuration
+depends on the value of α and the specific attributes of the PI (e.g. KL between teacher and student).
+
+Using this setup, we collect 15,885 successful traces for τ -Bench retail and 1,986 for Travel Planner, evenly
+sampled across tasks. From these traces, for each training task, we select the successful trajectory with
+the least number of steps to build the PI. In total, we obtain PI for all 45 tasks in Travel Planner and
+300/500 tasks in τ -Bench. We note we exclude the self-generated hints for R1-Deepseek-Distill-LLama-8B
+as it consistently returns the raw input trace or tool calls as the hint.
+
+4.3
+
+Models and Baselines
+
+Models. We employ Qwen3-4B and Qwen3-8B (Yang et al., 2025a) being strong reasoning models. We also
+evaluate R1-Distill-Llama-8B to cover a distinct model family. We find this model fails to generate correct
+trajectories even when conditioned on PI in both benchmarks, making direct RL training unfeasible. Thus,
+exclusively for R1-Distill-Llama-8B, we warm-start it using SFT w/ CoT from expert traces. This setup
+allows us to determine if PI remains beneficial even when the model has already seen it during training.
+Baselines. We instantiate π-Distill with α ∈ {0, 0.5, 1} and OPSD. We compare against (i) standard RL,
+(ii) SFT on expert trajectories with and without CoT, and (iii) SFT followed by RL. We utilize the GRPO
+objective outlined in equation (1) for all RL-based algorithms. Following Vattikonda et al. (2025), we sweep
+over multiple SFT checkpoints for SFT+RL baselines and report results using the checkpoint that yields the
+strongest final performance. We use the full set of collected successful traces for all SFT baselines, as this
+maximized performance. For π-Distill and OPSD in τ -Bench, we utilize PI whenever available otherwise, we
+sample the traces with the student and perform regular RL for that goal.
+
+6
+
+Table 1 Evaluation results on Travel Planner, τ -Bench (Retail), and τ -Bench (Airline). Shaded rows denote our methods.
+Bold values indicate the best performance within each model category, while underlined values indicate the second-best.
+Results show mean ± standard deviation across three random seeds. We find that both π-Distill and OPSD effectively
+leverage PI, consistently outperforming all baselines that lack access to frontier reasoning traces. Furthermore, both
+methods can surpass SFT w/ CoT + RL on TravelPlanner, with π-Distill also achieving superior performance on
+τ -Bench.
+
+Travel Planner
+
+τ -Bench Retail
+
+τ -Bench Airline (OOD)
+
+45.0% ± 3.78
+
+51.3% ± 0.212
+
+40.0% ± 0.161
+
+0.00% ± 0.00
+6.35% ± 1.27
+2.40% ± 0.86
+12.4% ± 1.56
+13.1% ± 1.09
+7.86% ± 1.75
+14.0% ± 1.63
+14.1% ± 3.27
+
+0.00% ± 0.00
+15.2% ± 0.44
+0.680% ± 0.17
+16.3% ± 1.49
+14.5% ± 0.00
+18.6% ± 0.50
+18.3% ± 0.77
+17.7% ± 0.77
+
+0.00% ± 0.00
+8.00% ± 5.29
+0.670% ± 1.15
+7.33% ± 4.16
+2.00% ± 0.00
+10.0% ± 2.00
+9.33% ± 3.06
+7.33% ± 4.16
+
+QWEN3-4B
+Base
+SFT w/ CoT
+SFT w/o CoT
+RL
+SFT w/o CoT + RL
+On-Policy Self Distillation
+π-Distill π S (α = 0)
+π-Distill π S + π T (α = 0.5)
+π-Distill π T (α = 1)
+
+17.6% ± 2.16
+21.1% ± 1.94
+20.8% ± 1.82
+25.1% ± 3.75
+23.3% ± 1.33
+29.8% ± 1.14
+28.5% ± 4.35
+33.8% ± 6.85
+28.2% ± 6.27
+
+5.03% ± 1.88
+12.4% ± 0.60
+15.2% ± 1.70
+15.2% ± 0.17
+17.6% ± 2.69
+23.1% ± 0.04
+25.3% ± 0.60
+22.6% ± 0.93
+22.5% ± 0.93
+
+2.21% ± 1.99
+2.67% ± 1.15
+4.00% ± 5.29
+5.33% ± 3.06
+5.33% ± 2.31
+10.6% ± 6.57
+8.00% ± 5.29
+6.00% ± 2.00
+12.0% ± 5.29
+
+SFT w/ CoT + RL
+
+26.4% ± 1.16
+
+23.3% ± 3.02
+
+6.67% ± 5.77
+
+QWEN3-8B
+Base
+SFT w/ CoT
+SFT w/o CoT
+RL
+SFT w/o CoT + RL
+On-Policy Self Distillation
+π-Distill π S (α = 0)
+π-Distill π S + π T (α = 0.5)
+π-Distill π T (α = 1)
+
+23.6% ± 2.23
+26.0% ± 2.27
+29.8% ± 1.71
+27.5% ± 0.95
+31.3% ± 2.79
+37.5% ± 1.53
+40.7% ± 1.14
+41.1% ± 7.24
+44.1% ± 2.16
+
+3.35% ± 1.47
+16.5% ± 4.66
+12.8% ± 0.77
+23.9% ± 0.44
+23.5% ± 4.27
+27.3% ± 0.33
+31.1% ± 0.73
+30.6% ± 0.67
+29.7% ± 0.33
+
+6.40% ± 3.02
+5.33% ± 1.15
+6.00% ± 4.00
+6.67% ± 3.06
+6.00% ± 2.00
+14.0% ± 5.66
+12.0% ± 6.00
+7.33% ± 1.15
+9.33% ± 3.06
+
+SFT w/ CoT + RL
+
+32.3% ± 1.10
+
+29.1% ± 2.14
+
+8.00% ± 3.46
+
+DeepSeek V3.1 Chat-671B
+Base
+R1-Distill-Llama-8B
+Base
+SFT w/ CoT
+SFT w/o CoT
+SFT w/ CoT + RL
+SFT w/ CoT + On-Policy Self Distillation
+SFT w/ CoT + π-Distill π S (α = 0)
+SFT w/ CoT + π-Distill π S + π T (α = 0.5)
+SFT w/ CoT + π-Distill π T (α = 1)
+
+Implementation Details. We run all experiments using 2 H100 GPUs with a context limit of 25k tokens
+(with one exception, see App. E). We found initially that traces often exceeded this limit, thus adopting a
+length penalty reward that penalizes trajectories exceeding 15k tokens (full details in App. E.2). Additionally,
+we observed during training that a few tokens referencing the PI consistently exhibited very high KL (e.g.,
+the token “hint”). We thus incorporate a penalty on the frequency of these tokens. Our final experiments
+incorporate this penalty, though we found in practice it makes little difference for final performance (see
+App. D for full details). All PI is added to the task description in the system prompt, using the prompts in
+App. H.4. We thoroughly sweep over relevant HPs for all baselines, for a full list see App. E.3. Using the best
+performing set, we run three seeds of this set and report their average. In experiments, we score models using
+the best running average over three subsequent checkpoints, capturing both performance and stability.
+
+7
+
+5
+
+Main Results
+
+In this section, we demonstrate that leveraging PI provides a potent learning signal on held-out tasks, proving
+effective even when full CoT supervision is available. Table 1 details performance metrics for Travel Planner
+and τ -Bench. Our primary finding is that π-Distill variants achieve superior performance across all but a
+single setting. With Qwen3-4B we find that π-Distill using α = 0 can outperform SFT + RL w/ CoT, with
+other variants approximating its performance. Notably, in Qwen3-8B, π-Distill consistently outperforms
+the industry standard (SFT w/ CoT + RL) regardless of α. In the best-case scenarios, π-Distill achieves
+substantial improvements: 11.8% on Travel Planner, and 2.08% and 6.00% on the retail and airline subsets of
+τ -Bench, respectively. These results are substantial as they confirm that π-Distill effectively distills frontier
+models even when CoT traces are hidden, enabling non-frontier models to become proficient at complex
+multi-step agentic tasks. Moreover, π-Distill achieves this with significantly greater efficiency. Unlike SFT w/
+CoT + RL, which requires sweeping over multiple SFT checkpoints to achieve peak performance (Vattikonda
+et al., 2025), π-Distill requires only a single training phase, greatly simplifying the training process.
+Regarding α, we observe that there is no definitive best value, rather the best-performing α varies by setting.
+We analyze this nuance further in § 7. When analyzing other methods that do not assume access to full CoT,
+we find RL and SFT w/o CoT + RL perform similarly, while RL requires significantly less compute, but find
+both fail to yield substantial gains, significantly lagging behind SFT w/ CoT + RL. Additionally, we find
+that OPSD, can substantially outperform these baselines in τ −Bench, while performing similarly in Travel
+Planner. We also observe that when OPSD succeeds, it provides substantial gains in OOD settings (τ -Bench
+Airline), scaling with model capacity, being the second best in Qwen3-4B and best in Qwen3-8B. Finally,
+our results on R1-Distill-Llama-8B show that π-Distill remains useful even if the model has previously been
+SFTd on traces containing the PI.
+Takeaways:
+1. π-Distill effectively substitutes for CoT: Our method consistently outperforms the standard SFT
+w/ CoT + RL baseline, demonstrating that raw actions can serve as a potent learning signal to
+distill frontier models even when reasoning traces are observable.
+2. Superior Efficiency: Unlike SFT that requires expensive sweeps over multiple SFT checkpoints,
+π-Distill requires only a single training phase and yields superior performance gains even on models
+that have already undergone SFT w/ CoT.
+3. OPSD is a potent alternative when CoT is not available: We find OPSD can substantially
+outperform base RL and SFT w/o CoT + RL being a potent alternative when CoTs are not
+available.
+
+6
+
+Out of Domain Experiments (OOD)
+
+In this section, we demonstrate that π-Distill generalizes effectively to OOD tasks, consistently outperforming
+standard RL and the base model, with this holding true for OPSD on Qwen3-8B. We report Pass@1 and
+Pass@10 metrics on the GEM (Liu et al., 2025b) search-tool benchmark suite which consists of 7 datasets. To
+simulate a realistic deployment scenario, we select the single best-performing checkpoint in τ -Bench retail for
+each model. We then evaluate these checkpoints across the suite using three random seeds and report the
+aggregated mean and standard errors in figure 4.
+We find that for both Qwen3 models, π-Distill variants consistently outperform the base model and standard
+RL holding true for OPSD under more capable models. When compared to SFT w/ CoT + RL, we observe
+differences based on model size. On Qwen3-4B, SFT w/ CoT + RL is consistently the top performer with
+OPSD showing significant degradation. For Qwen3-8B, however, we find that α = 0 and α = 0.5 variants of
+π-Distill as well as OPSD can significantly outperform SFT w/ CoT + RL. For π-Distill, this aligns with our
+findings in section 5. Where for Qwen3-4B not all π-Distill variants show substantial improvements over SFT
+w/ CoT + RL, whereas for Qwen3-8B, the opposite trend is observed. We observe a similar trend for OPSD,
+where it shows significant degradation on Qwen3-4B, while on Qwen3-8B it shows significant improvements.
+We attribute this to the possibility that on smaller models, OPSD may overfit the teacher supervision for
+8
+
+Score (%)
+
+Qwen3 4B
+25
+
+35
+
+20
+
+30
+
+15
+
+Pass@1
+
+25
+
+SFT w/ COT + RL
+
+Qwen3 8B
+30
+
+45
+
+25
+
+40
+
+2
+
+20
+
+Pass@10
+T(
+
+R1-Distilled-LLAMA 8B
+4
+
+= 1)
+
+Pass@1
+S(
+
+35
+
+= 0)
+
+Pass@10
+S+ T (
+
+= 0.5)
+
+0
+
+Self Distill
+
+12
+
+10
+
+8
+
+Pass@1
+Base
+
+Pass@10
+
+RL
+
+Figure 4 Evaluation on Out-of-Domain Environments. We report Pass@1 and Pass@10 on the GEM search-tool
+benchmark suite (7 datasets) for Qwen 3 models and R1-Distill-Llama-8B, using the best checkpoint selected on
+τ -Bench Retail. Bars show mean ± standard errors over three seeds per dataset, comparing π-Distill variants (π T
+(α = 1), π S (α = 0), π T + π S (α = 0.5)) and OPSD against SFT w/ CoT + RL, πBase , and standard RL. The dashed
+line separating SFT w/ CoT + RL denotes that this method is not considered a required baseline, as all PI methods
+avoid relying on frontier-model CoT traces. We consistently find that both algorithms exhibit substantially less
+forgetting than standard RL. Moreover, we find π-Distill and OPSD generalize significantly better than SFT w/ CoT
++ RL when using Qwen 3-8B.
+
+the task, while the more potent reasoners can provide more generalizable feedback. Overall, results on both
+π-Distill and OPSD imply that explicit supervision from frontier model’s CoT is more important for smaller
+models, where stronger reasoners benefit from being more on-policy via self-generated CoT. Additionally, we
+observe deterioration in R1-Distill-Llama-8B under SFT w/ CoT + RL, where performance drops below the
+base model. While π-Distill and OPSD do not improve over the base model in this specific case, they avoid
+significant deterioration. Finally, raw RL consistently exhibits degradation relative to the base model across
+all evaluations. Overall, these results indicate that π-Distill is highly effective for distillation in OOD settings
+when CoT traces are occluded, preventing performance from regressing below the base model. Moreover, both
+π-Distill and OPSD show significant improvements as model size scales.
+Takeaways: OOD Generalization
+1. Scaling Benefits for Stronger Reasoners: While SFT w/ CoT + RL is effective for Qwen3-4B,
+π-Distill and OPSD significantly outperform SFT w/ CoT + RL on Qwen3-8B. This suggests
+that as model capacity grows, transfer can be enhanced by staying more on-policy.
+2. Prevention of RL Degradation: Across all benchmarks, standard RL consistently performs worse
+than the base model. In contrast, OPSD avoids degradation in stronger reasoners, with π-Distill
+avoiding it in all cases.
+
+7
+
+What Matters When Using Train-Time PI
+
+While prior sections focused on the best-performing configurations, here we analyze how varying the type
+of PI affects final performance. Our goal is to isolate the factors that determine success when training with
+PI. We identify two primary drivers: (i) the divergence between the conditioned and unconditioned base
+T
+S
+S
+T
+policies ( DKL (πbase
+∥ πbase
+) for π-Distill and DKL (πbase
+∥ πbase
+) for OPSD), and (ii) the usefulness of the
+T
+S
+privileged signal, captured by the utility ∆ = score(πbase ) − score(πbase
+) on training tasks. Additionally, in
+figure 6 we report the maximum attainable utility on ∆max = maxt score(πtPI ) − maxt score(πtRL ), defined as
+the difference between the best scores on training tasks achieved with PI and without PI (pure RL), which
+measures how effectively each algorithm converts access to PI into performance gains.
+
+9
+
+Score (%)
+
+25
+
+-Bench - QWEN3 4B
+
+-Bench - QWEN3 8B
+30
+
+(%)
+
+10
+
+25
+0.1
+
+0.2
+
+DKL( T || S)
+
+0.3
+
+20
+
+20
+
+20
+
+0
+
+0
+
+Travel Planner - QWEN3 4B
+
+Score (%)
+
+18
+
+20
+15
+
+35
+30
+25
+
+(%)
+
+0.12
+
+0.16
+
+DKL( T || S)
+
+17
+0.08
+
+0.16
+
+DKL( T || S)
+
+0.24
+
+0.08
+
+Travel Planner - QWEN3 8B
+
+0.32
+
+Travel Planner - R1-Distilled-LLAMA 8B
+
+15.0
+12.5
+
+35
+
+10.0
+
+30
+
+7.5
+0.12
+
+0.16
+
+0.20
+
+0.24
+
+DKL( T || S)
+
+0.120
+
+0.128
+
+0.136
+
+= 0)
+
+RL
+
+DKL( T || S)
+
+0.0
+2.5
+
+Privileged Information
+
+Self-Generated Hints
+
+0.24
+
+0
+
+2.5
+0.0
+
+0
+
+0.16
+
+DKL( T || S)
+
+20
+
+40
+
+0.20
+
+5
+
+Tool Calls
+
+45
+
+-Bench - R1-Distilled-LLAMA 8B
+
+19
+
+Tool Calls & Arguments
+
+T+ S (
+
+Algorithms
+
+= 0.5)
+
+T(
+
+= 1)
+
+S(
+
+Baselines
+
+SFT + RL
+
+Figure 5 Impact of PI Types and Algorithms on Performance. We compare held-out performance on τ -Bench (top row)
+and Travel Planner (bottom row) across three base models and three PI types (colors). The scatter plots map final
+T
+S
+scores against the initial teacher-student divergence (DKL (πbase
+∥ πbase
+)), while the bar-charts display the PI utility
+(∆) on training tasks. Key observations: (1) Higher initial KL divergence generally correlates with decreased final
+performance. (2) Joint training (α = 0.5, △) is the most stable configuration, performing best in 6/16 scenarios and
+worst in a single one. (3) Student-only training (α = 0, □) requires low KL and positive utility (note the failure in
+Planner QWEN3 8B where ∆ < 0). Conversely, Teacher-only training (α = 1, ⃝) degrades as KL increases or fails
+due to policy collapse when KL is negligible.
+T | KL Divergence During Training
+
+KL Divergence
+
+Self-Generated Hints
+Figure 5 displays
+0.5 held-out performance on both τ -Bench
+=0.0
+Retail and Travel Planner
+=0.25 across the types of PI de=0.5 subplot maps final perforfined in Section
+0.4 4.2. Each
+T
+S
+mance against the initial divergence DKL (πbase
+∥ πbase
+),
+with accompanying
+bar plots showing the utility ∆ for
+0.3
+each type of PI. The most prominent pattern is that as
+the initial KL 0.2
+increases, final performance tends to decrease, though the full picture requires a more nuanced,
+α-dependent analysis.
+0.1
+
+0.5
+0.4
+0.3
+0.2
+0.1
+
+Tool calls
+
+Teacher only 0.0
+training α = 1. In this setting, we find
+0.0
+0
+25
+50
+75 100 125 150 175 200
+0
+25
+50
+75 100 125 150 175 200
+performance generally declines
+or maintains
+Gradient
+Steps as KL diGradient Steps
+vergence increases. The primary exception occurs when
+using only tool calls in τ -Bench, where this variant underFigure 7 Training KL between π T and π S during trainperforms. We trace this failure mode to an early collapse
+ing the teacher π S (α = 1) on τ -Bench. We observe an
+in KL divergence. Figure 7 displays the KL as training
+early KL collapse making π S ≈ π T . We attribute the
+underperformance of π T on low KL settings to this
+progresses. We observe that even when β = 0 the KL
+collapse.
+drops to near zero, indicating teacher and student have
+collapsed onto each other (π T ≈ π S ). As a consequence,
+
+10
+
+To
+
+0.5
+
+=0.0
+=0.25
+=0.5
+
+KL Divergence
+
+What matters for π-Distill
+
+KL Divergence
+
+7.1
+
+=0.0
+=0.25
+=0.5
+
+0.4
+0.3
+0.2
+0.1
+0.0
+
+0
+
+25
+
+50
+
+-Bench
+Max (%)
+
+QWEN3 4B
+
+QWEN3 8B
+
+R1-Distilled-LLAMA 8B
+0.20
+
+40
+
+30
+
+30
+
+20
+
+20
+
+10
+
+10
+
+0
+
+0.00
+
+0
+
+10
+
+0.05
+
+Travel Planner
+Max (%)
+
+Tool
+Calls
+
+Self-Generated
+Hints
+
+Tool
+Calls
+&
+Arguments
+
+6
+4
+2
+0
+Tool
+Calls
+
+Self-Generated
+Hints
+
+Tool
+Calls
+&
+Arguments
+
+S(
+
+= 0)
+
+0.15
+0.10
+0.05
+
+Tool
+Calls
+
+14
+12
+10
+8
+6
+4
+2
+0
+
+T(
+
+Self-Generated
+Hints
+
+Tool
+Calls
+&
+Arguments
+
+Tool
+Calls
+
+Tool
+Calls
+&
+Arguments
+
+Tool
+Calls
+
+Tool
+Calls
+&
+Arguments
+
+0.100
+0.075
+0.050
+0.025
+0.000
+0.025
+0.050
+Tool
+Calls
+
+= 1)
+
+Self-Generated
+Hints
+
+T+ S (
+
+= 0.5)
+
+Tool
+Calls
+&
+Arguments
+
+On-Policy Self-Distillation
+
+Figure 6 Maximum Improvement (∆max ) across PI Types and Algorithms. We compare the peak performance gain over
+baselines for different PI variants (x-axis) and training configurations (α) on TravelPlanner (bottom) and τ -Bench
+(top). We find that PI types which initially underperform (e.g., self-generated hints on Planner, Qwen3-8B) can yield
+substantial gains when the teacher is trained to utilize them (α > 0), confirming that learning to leverage PI is an
+important factor in transferring from teacher π T to student π S .
+
+we find the teacher π T learns to ignore the P,I causing it to underperform even the RL baseline. We attempted
+to mitigate this by using πbase instead of π S when calculating the KL, but found this further degraded results
+(see App. D.2).
+In addition, our results confirm that training the teacher is an important part of leveraging PI. We can see
+this from the observation that even when the initial utility is negative (∆ < 0), training the teacher allows
+the policy to learn to leverage the PI, consistently showing positive ∆max values in such cases. We find that
+effectively learning to use the PI is a significant contributing factor to transfer when only training the teacher.
+Joint training α = 0.5. We identify α = 0.5 as the most robust configuration. It achieves the best performance
+in 7 out of 16 scenarios and effectively avoids the failure modes of the other variants, ranking as the worst
+performer only once. By balancing both teacher and student objectives, α = 0.5 is able to mitigate the failure
+cases of independent training. We believe more granular tuning of α can likely lead to optimal performance in
+most settings, leaving this as future work.
+Student only training α = 0. Here, low KL divergence is a strong predictor of success. In τ -Bench, for
+example, setting α = 0 with only tool calls consistently yields the best results, as the minimal distribution
+shift makes learning from the conditioned traces significantly easier. As KL divergence rises, performance
+generally drops, though high-utility PI can occasionally reverse this trend.
+Further, we find that PI utility ∆ can play a large role in the success of this variant. For instance, on
+Travel Planner with Qwen3-8B, α = 0 underperforms significantly because the PI provides negative utility
+(∆ < 0), actively degrading performance. Furthermore, as seen in figure 6, we find that ∆max ≈ 0 in these
+failure cases, confirming that the algorithm cannot extract value from the PI when the signal itself offers no
+initial advantage over the base model. On the other hand, we find that when the teacher-student KL is low,
+student-only training effectively transfers knowledge back onto the teacher. This allows the teacher to learn
+how to leverage PI even though it is not being directly trained. We observe this behavior in Qwen3-8B on
+Travel Planner when using only tool calls as PI. While the initial ∆ < 0, the low KL allows transfer to occur
+from the student to the teacher and enables the teacher to sample improved traces.
+
+11
+
+Takeaways: Analysis on Privileged Information
+• Student only training. Useful-low KL PI is easy to learn from using π S (α = 0). Higher KL or low
+utility PI leads to suboptimal performance.
+• Teacher only training. We find teacher-training, π T (α = 1), provides performance gains under
+two factors. (1) Ensuring that PI is useful or can be learned (see figure 6). (2) Avoiding teacher
+and student collapse π S ̸≈ π T .
+• Joint training. We find joint training, π S + π T (α = 0.5), to be the most stable mitigating failure
+cases of independent training. Never significantly working the worst. We recommend this approach
+when lacking multiple types of PI or sweeping values of α is unfeasible.
+
+7.2
+
+What Matters for OPSD
+
+Score (%)
+
+-Bench - QWEN3 4B
+
+15
+
+(%)
+
+15
+
+0.05
+
+0.10
+
+0.15
+
+DKL( S || T)
+
+0.20
+
+10
+5
+0.05 0.10 0.15 0.20 0.25 0.30
+
+DKL( S || T)
+
+1.18
+
+20
+
+20
+
+10
+
+0
+
+0
+
+0
+
+30
+
+Score (%)
+
+-Bench - R1-Distilled-LLAMA 8B
+
+27.5
+25.0
+22.5
+20.0
+
+20
+
+10
+
+-Bench - QWEN3 8B
+
+Travel Planner - QWEN3 4B
+
+11
+
+32.5
+
+10
+
+30.0
+0.05
+
+0.10
+
+0.15
+
+DKL( S || T)
+
+0.20
+
+27.5
+
+0.10
+
+0.15
+
+0
+
+Tool Calls
+
+Privileged Information
+
+Self-Generated Hints
+
+0.20
+
+DKL( S || T)
+
+2.5
+0.0
+
+5
+
+1.24
+
+12
+
+35.0
+
+26
+
+1.22
+
+DKL( S || T)
+
+Travel Planner - R1-Distilled-LLAMA 8B
+
+37.5
+
+28
+
+(%)
+
+Travel Planner - QWEN3 8B
+
+1.20
+
+0.25
+
+9
+
+0.110
+
+0.115
+
+0.120
+
+DKL( S || T)
+
+0.0
+2.5
+
+Tool Calls & Arguments
+
+Algorithms
+
+On-Policy Self-Distillation
+
+RL
+
+Baselines
+
+SFT + RL
+
+Figure 8 Performance and Stability Analysis of OPSD. We compare held-out performance on τ -Bench (top row) and
+Travel Planner (bottom row) across three base models and three PI types (colors). The scatter plots map final
+scores against the student-teacher KL divergence (DKL (π S ∥π T )), while the bar-charts display the PI utility (∆). Key
+observations: (1) Unlike π-Distill, higher KL are not always detrimental, rather, information richness of PI is most
+important, finding (Tool Calls & Arguments) often performs best (e.g., all results on Travel Planner and Qwen3-4B on
+τ −Bench ). (2) Excessive KL can override positive utility (note Qwen3-8B on τ -Bench, where ∆ > 0 but the high
+KL degrades performance). (3) R1-Distill-Llama-8B consistently struggles, which we attribute to either extreme KL
+divergence (τ -Bench) or negative PI utility (TravelPlanner).
+
+Figure 8 similarly to figure 5 displays performance on τ -Bench retail and Travel Planner across PI types
+outlined in section 4.2.
+Findings. Our main finding is that, contrary to π-Distill, high-KL PI types do not necessarily indicate worse
+performance. Instead, the information content of the PI is the strongest predictor of successful transfer.
+For example, Tool Calls & Arguments, being the richest in information, consistently performs best for both
+Qwen3 models on Travel Planner, and also achieves the best performance for Qwen3-4B on τ -Bench.
+Interestingly, although we find that high-information PI is generally best suited for transfer, we observe
+12
+
+Travel Planner
+Score (%)
+
+-Bench
+Score (%)
+
+S ( = 0)
+PI: Tool Calls
+30
+25
+20
+15
+10
+5
+0
+45
+40
+35
+30
+25
+20
+15
+10
+
+0
+
+0
+
+50
+
+50
+
+100
+
+150
+
+200
+
+PI: Tool Calls
+
+100
+
+150
+
+Gradient Steps
+
+T ( = 1)
+PI: Self-Generated Hints
+
+T + S ( = 0.5)
+PI: Tool Calls & Arguments
+
+250
+
+200
+
+300
+
+250
+
+30
+25
+20
+15
+10
+5
+0
+45
+40
+35
+30
+25
+20
+15
+10
+
+0
+
+0
+
+100
+
+50
+
+200
+
+PI: Tool Calls
+
+100
+
+150
+
+Gradient Steps
+
+300
+
+200
+
+400
+
+250
+
+30
+25
+20
+15
+10
+5
+0
+45
+40
+35
+30
+25
+20
+15
+10
+
+0
+
+50
+
+100
+
+PI: Tool Calls
+
+150
+
+200
+
+=0
+= 0.1
+= 0.25
+= 0.5
+
+0
+
+50
+
+100
+
+150
+
+Gradient Steps
+
+200
+
+250
+
+Figure 9 Evaluation performance throughout training for π-Distill variants across varying KL penalties (β). Runs that
+deteriorate significantly early are truncated for visual clarity. We observe that for settings involving teacher updates
+(α > 0), a non-zero penalty (β > 0) is crucial for stabilizing training and achieving peak performance. Here error bars
+indicate standard errors. Discrepancies between plot and table values are addressed in App. F
+
+exceptions. In particular, for Qwen3-8B on τ -Bench, Tool Calls & Arguments performs the worst and exhibits
+the highest KL. In this case, we observe that ∆max is negative, indicating that the reverse-KL penalty can
+inhibit training. Additionally, regarding the failure on R1-Distill-Llama-8B, while this could be due to the
+SFT phase prior to OPSD, we find that on τ -Bench the KL for both PI types is exceptionally high. While on
+Travel Planner, the PI utility, ∆ is low or negative, possibly explaining the diminished results. Overall, we
+find that the strongest predictor of performance for OPSD is the information content of the PI. While using
+the richest form of PI can lead to the best results, careful consideration is required to ensure the KL does not
+become excessive and hinder training.
+
+8
+
+Ablation on β
+
+In this section, we analyze β, the term controlling the regularization between the student and teacher, finding it
+important for achieving the best performance in 17/21 ablated configurations. We conduct extensive ablations
+on β keeping all other parameters fixed, sweeping over β = {0, 0.1, 0.25, 0.5}. We analyze all values of α and
+PI types for both π-Distill and OPSD on τ -Bench using both Qwen3 models, as well as the best-performing
+PI type for Travel Planner. All results are reported over three random seeds.
+Figure 9 shows a subset of the learning curves on held-out data for the best-performing PI type and α value
+in τ -Bench Retail and Travel Planner, while figure 16 provides the full set for τ -Bench. For π-Distill, we
+consistently find that β > 0 aids in obtaining the best performance, particularly when the teacher is being
+trained (α > 0). While β can be sensitive, with no single value being the best in all settings, setting β higher
+than 0 generally allows for better or matching performance, with only four cases showing inferior results. For
+OPSD, we find that the value of β is less important with our results on section 7 showing that information
+granularity and student-teacher KL are more important factors.
+
+13
+
+9
+
+Related Work
+
+Latent Reasoning and Variational Perspectives. Recent work increasingly frames LM reasoning as a
+latent-variable inference problem (Hu et al., 2024; Sordoni et al., 2023; Luo et al., 2025; Li et al., 2025).
+Within this framework, the most popular approach is STaR (Li et al., 2025), which uses a hint when the
+model is unable to correctly answer the question and then uses SFT to fit onto the generated reasoning trace.
+This is similar to student-only training in π-Distill (α = 0), where, rather than a KL-regularized off-policy RL
+objective, SFT is used, and the teacher is not trained. Most similar to π-Distill is the work by (Zhou et al.,
+2025), which proposes variational reasoners. This approach can be seen as a modified version of STaR, where
+both teacher and student are being trained iteratively. The main difference between variational reasoning and
+our work is that they assume access to oracle answers and perform an iterative version of variational EM
+using separate parameters for the teacher and student. In comparison, we simplify the training objective by
+allowing the teacher and student to share parameters and do not assume access to ground truth answers. We
+compare against a similar setup with minor modifications due to not having access to ground truth solutions
+in App. A.2.
+Self-Bootstrapping, Privileged Signals, and Guided Exploration. Complementary work focuses on using
+privileged or auxiliary signals to enable learning in hard regimes. Chen et al. (2025) injects self-generated
+high-level hints into online RL to overcome zero-reward exploration barriers, while Qu et al. (2026) uses
+privileged oracle solutions as structured on-policy exploration signals for hard reasoning tasks. Both these
+algorithms can be viewed as training the teacher to use PI with implicit transfer via parameter sharing.
+Additionally, other lines of work explore distilling certain skills/behaviors in the model via contextualized
+sampling (Didolkar et al., 2025, 2024; Yang et al., 2025b; Qu et al., 2025). We believe our proposed methods
+could be used to distill desired skills/behaviors into model weights in a more effective manner compared to
+traditional SFT.
+Context Distillation. Both our proposed methods can be seen as a form of context distillation. This growing
+line of work studies how to train models to internalize context-dependent reasoning so that the benefits of
+rich contexts (e.g., instructions, demonstrations, auxiliary computations) are distilled into the model’s weights
+(Caccia et al., 2025; Snell et al., 2022; Huang et al., 2022). Other works analyze this problem by performing
+SFT answers they give when having access to context Snell et al. (2022). Moreover, other works also try to
+encapsulate such knowledge into adapters that can be plugged and played at test time (Caccia et al., 2025).
+
+10
+
+Limitations & Future Work
+
+While we show that both π-Distill and OPSD are effective algorithms when CoT is not available, all our PI is
+transformed from frontier model traces. Exploring how to efficiently obtain useful PI when neither frontier
+model actions nor ground-truth answers are available is an interesting direction. Concurrent work by Hübotter
+et al. (2026) explores this direction by mining PI through self-reflection. Additionally, our experiments are
+limited to models with ≤ 8B parameters. Further scaling of both π-Distill and OPSD can shine light on
+additional important factors to enable these algorithms. Moreover, our analysis in section 7 is limited to
+observational studies, where we do not systematically control for all variables, but rather observe properties
+of different configurations. A study that systematically controls for these factors could help in mitigating
+failure cases and obtaining the most useful PI.
+
+11
+
+Conclusion
+
+We introduce π-Distill and On-Policy Self-Distillation, two algorithms that leverage PI at training time to
+produce an improved policy even when that information is lacking at test time. By grounding our work in
+the distillation of frontier models where CoT reasoning is inaccessible, we demonstrate that the absence of
+these proprietary traces is not a limiting factor. In fact, our approach remains effective even when compared
+to industry standards that assume access to full CoT reasoning. Through evaluations across two training
+domains and eight OOD datasets, we find that π-Distill and OPSD are highly effective in all explored settings.
+14
+
+Finally, we characterize the factors driving the distillation of training-time PI, showing that its success can
+often be predicted using only base-model statistics.
+
+12
+
+Acknowledgments
+
+We thank and credit Siddarth Venkatraman for the idea to view learning from PI from a variational perspective,
+which led to the final version of π-Distill. We thank Vedant Shah for helpful discussion and proof reading
+initial drafts of the paper. Additionally, we thank Michael Noukhovitch for valuable feedback that substantially
+aided the final draft of this work. We also thank Alexandre Piché for their valuable discussions.
+EP acknowledges the support of the NSERC PGS-D grant, the Bourse en intelligence artificielle provided by
+Université de Montréal and the MITACS Accelerate grant. DV acknowledges the support of the MITACS
+Accelerate grant. LC recognizes the support of NSERC, the Canada CIFAR AI Chair Program, the Canada
+First Research Excellence Fund and IVADO.
+
+13
+
+Author Contributions
+
+Emiliano Penaloza proposed the idea of leveraging PI, led the project, implemented all algorithms and the
+RL environments, conducted most experiments, and was the primary writer of the paper.
+Dheeraj Vattikonda was a core part of the project, with the final version heavily improved by their contributions.
+Specifically, they provided substantial support on all experiments over the course of the project, implemented
+and conducted experiments on OOD environments, and provided heavy contributions to paper writing and
+figures.
+Nicolas Gontier helped in advising the project and providing detailed feedback that substantially improved
+experimental rigor.
+Alexandre Lacoste advised the project, providing valuable insights to the goal and purpose of leveraging PI,
+helped improve experimental rigor and analysis, and assisted in paper writing.
+Laurent Charlin advised the project, helping influence the framing and perspective of the project, and provided
+help with writing, with a substantial portion of the introduction written by them.
+Massimo Caccia was a core member of the project. They helped shape the research direction, proposed the
+on-policy self-distillation component, guided the design of extensive ablation studies, and provided detailed
+technical guidance across all stages. They also contributed substantially to writing and figures. (They are
+also responsible for the green outline in the abstract when it should have been purple.)
+
+15
+
+References
+Rishabh Agarwal, Nino Vieillard, Yongchao Zhou, Piotr Stanczyk, Sabela Ramos, Matthieu Geist, and Olivier
+Bachem. On-policy distillation of language models: Learning from self-generated mistakes, 2024. URL https:
+//arxiv.org/abs/2306.13649.
+Afra Amini, Tim Vieira, and Ryan Cotterell. Better estimation of the kullback–leibler divergence between language
+models, 2025. URL https://arxiv.org/abs/2504.10637.
+Lucas Caccia, Alan Ansell, Edoardo Ponti, Ivan Vulić, and Alessandro Sordoni. Training plug-n-play knowledge
+modules with deep context distillation, 2025. URL https://arxiv.org/abs/2503.08727.
+Justin Chih-Yao Chen, Becky Xiangyu Peng, Prafulla Kumar Choubey, Kung-Hsiang Huang, Jiaxin Zhang, Mohit
+Bansal, and Chien-Sheng Wu. Nudging the boundaries of llm reasoning, 2025. URL https://arxiv.org/abs/2509.
+25666.
+DeepSeek-AI, Daya Guo, Dejian Yang, Haowei Zhang, Junxiao Song, Ruoyu Zhang, Runxin Xu, Qihao Zhu, Shirong
+Ma, Peiyi Wang, Xiao Bi, Xiaokang Zhang, Xingkai Yu, Yu Wu, Z. F. Wu, Zhibin Gou, Zhihong Shao, Zhuoshu Li,
+Ziyi Gao, Aixin Liu, Bing Xue, Bingxuan Wang, Bochao Wu, Bei Feng, Chengda Lu, Chenggang Zhao, Chengqi
+Deng, Chenyu Zhang, Chong Ruan, Damai Dai, Deli Chen, Dongjie Ji, Erhang Li, Fangyun Lin, Fucong Dai, Fuli
+Luo, Guangbo Hao, Guanting Chen, Guowei Li, H. Zhang, Han Bao, Hanwei Xu, Haocheng Wang, Honghui Ding,
+Huajian Xin, Huazuo Gao, Hui Qu, Hui Li, Jianzhong Guo, Jiashi Li, Jiawei Wang, Jingchang Chen, Jingyang Yuan,
+Junjie Qiu, Junlong Li, J. L. Cai, Jiaqi Ni, Jian Liang, Jin Chen, Kai Dong, Kai Hu, Kaige Gao, Kang Guan, Kexin
+Huang, Kuai Yu, Lean Wang, Lecong Zhang, Liang Zhao, Litong Wang, Liyue Zhang, Lei Xu, Leyi Xia, Mingchuan
+Zhang, Minghua Zhang, Minghui Tang, Meng Li, Miaojun Wang, Mingming Li, Ning Tian, Panpan Huang, Peng
+Zhang, Qiancheng Wang, Qinyu Chen, Qiushi Du, Ruiqi Ge, Ruisong Zhang, Ruizhe Pan, Runji Wang, R. J. Chen,
+R. L. Jin, Ruyi Chen, Shanghao Lu, Shangyan Zhou, Shanhuang Chen, Shengfeng Ye, Shiyu Wang, Shuiping Yu,
+Shunfeng Zhou, Shuting Pan, S. S. Li, Shuang Zhou, Shaoqing Wu, Shengfeng Ye, Tao Yun, Tian Pei, Tianyu Sun,
+T. Wang, Wangding Zeng, Wanjia Zhao, Wen Liu, Wenfeng Liang, Wenjun Gao, Wenqin Yu, Wentao Zhang, W. L.
+Xiao, Wei An, Xiaodong Liu, Xiaohan Wang, Xiaokang Chen, Xiaotao Nie, Xin Cheng, Xin Liu, Xin Xie, Xingchao
+Liu, Xinyu Yang, Xinyuan Li, Xuecheng Su, Xuheng Lin, X. Q. Li, Xiangyue Jin, Xiaojin Shen, Xiaosha Chen,
+Xiaowen Sun, Xiaoxiang Wang, Xinnan Song, Xinyi Zhou, Xianzu Wang, Xinxia Shan, Y. K. Li, Y. Q. Wang, Y. X.
+Wei, Yang Zhang, Yanhong Xu, Yao Li, Yao Zhao, Yaofeng Sun, Yaohui Wang, Yi Yu, Yichao Zhang, Yifan Shi,
+Yiliang Xiong, Ying He, Yishi Piao, Yisong Wang, Yixuan Tan, Yiyang Ma, Yiyuan Liu, Yongqiang Guo, Yuan Ou,
+Yuduan Wang, Yue Gong, Yuheng Zou, Yujia He, Yunfan Xiong, Yuxiang Luo, Yuxiang You, Yuxuan Liu, Yuyang
+Zhou, Y. X. Zhu, Yanhong Xu, Yanping Huang, Yaohui Li, Yi Zheng, Yuchen Zhu, Yunxian Ma, Ying Tang, Yukun
+Zha, Yuting Yan, Z. Z. Ren, Zehui Ren, Zhangli Sha, Zhe Fu, Zhean Xu, Zhenda Xie, Zhengyan Zhang, Zhewen Hao,
+Zhicheng Ma, Zhigang Yan, Zhiyu Wu, Zihui Gu, Zijia Zhu, Zijun Liu, Zilin Li, Ziwei Xie, Ziyang Song, Zizheng
+Pan, Zhen Huang, Zhipeng Xu, Zhongyu Zhang, and Zhen Zhang. Deepseek-r1: Incentivizing reasoning capability
+in llms via reinforcement learning. arXiv preprint arXiv:2501.12948, 2025. URL https://arxiv.org/abs/2501.12948.
+Aniket Didolkar, Anirudh Goyal, Nan Rosemary Ke, Siyuan Guo, Michal Valko, Timothy Lillicrap, Danilo Rezende,
+Yoshua Bengio, Michael Mozer, and Sanjeev Arora. Metacognitive capabilities of llms: An exploration in mathematical
+problem solving, 2024. URL https://arxiv.org/abs/2405.12205.
+Aniket Didolkar, Nicolas Ballas, Sanjeev Arora, and Anirudh Goyal. Metacognitive reuse: Turning recurring llm
+reasoning into concise behaviors, 2025. URL https://arxiv.org/abs/2509.13237.
+Xanh Ho, Anh-Khoa Duong Nguyen, Saku Sugawara, and Akiko Aizawa. Constructing a multi-hop QA dataset for
+comprehensive evaluation of reasoning steps. In Proceedings of the 28th International Conference on Computational
+Linguistics, pp. 6609–6625, Barcelona, Spain (Online), December 2020. International Committee on Computational
+Linguistics. URL https://www.aclweb.org/anthology/2020.coling-main.580.
+Edward J. Hu, Moksh Jain, Eric Elmoznino, Younesse Kaddar, Guillaume Lajoie, Yoshua Bengio, and Nikolay Malkin.
+Amortizing intractable inference in large language models, 2024. URL https://arxiv.org/abs/2310.04363.
+Yukun Huang, Yanda Chen, Zhou Yu, and Kathleen McKeown. In-context learning distillation: Transferring few-shot
+learning ability of pre-trained language models, 2022. URL https://arxiv.org/abs/2212.10670.
+Jonas Hübotter, Frederike Lübeck, Lejs Behric, Anton Baumann, Marco Bagatella, Daniel Marta, Ido Hakimi, Idan
+Shenfeld, Thomas Kleine Buening, Carlos Guestrin, and Andreas Krause. Reinforcement learning via self-distillation,
+2026. URL https://arxiv.org/abs/2601.20802.
+
+16
+
+Mandar Joshi, Eunsol Choi, Daniel S Weld, and Luke Zettlemoyer. TriviaQA: A large scale distantly supervised
+challenge dataset for reading comprehension. In Proceedings of the 55th Annual Meeting of the Association for
+Computational Linguistics, 2017.
+Tom Kwiatkowski, Jennimaria Palomaki, Olivia Redfield, Michael Collins, Ankur Parikh, Chris Alberti, Danielle
+Epstein, Illia Polosukhin, Jacob Devlin, Kenton Lee, et al. Natural questions: a benchmark for question answering
+research. Transactions of the Association for Computational Linguistics, 7:453–466, 2019.
+Chengpeng Li, Mingfeng Xue, Zhenru Zhang, Jiaxi Yang, Beichen Zhang, Xiang Wang, Bowen Yu, Binyuan Hui, Junyang
+Lin, and Dayiheng Liu. Start: Self-taught reasoner with tools, 2025. URL https://arxiv.org/abs/2503.04625.
+Zichen Liu, Changyu Chen, Wenjun Li, Penghui Qi, Tianyu Pang, Chao Du, Wee Sun Lee, and Min Lin. Understanding
+r1-zero-like training: A critical perspective, 2025a. URL https://arxiv.org/abs/2503.20783.
+Zichen Liu, Anya Sims, Keyu Duan, Changyu Chen, Simon Yu, Xiangxin Zhou, Haotian Xu, Shaopan Xiong, Bo Liu,
+Chenmien Tan, Chuen Yang Beh, Weixun Wang, Hao Zhu, Weiyan Shi, Diyi Yang, Michael Shieh, Yee Whye Teh,
+Wee Sun Lee, and Min Lin. Gem: A gym for agentic llms, 2025b. URL https://arxiv.org/abs/2510.01051.
+Renjie Luo, Zichen Liu, Xiangyan Liu, Chao Du, Min Lin, Wenhu Chen, Wei Lu, and Tianyu Pang. Language models
+can learn from verbal feedback without scalar rewards, 2025. URL https://arxiv.org/abs/2509.22638.
+Alex Mallen, Akari Asai, Victor Zhong, Rajarshi Das, Hannaneh Hajishirzi, and Daniel Khashabi. When not to trust
+language models: Investigating effectiveness and limitations of parametric and non-parametric memories. arXiv
+preprint, 2022.
+OpenAI, :, Aaron Jaech, Adam Kalai, Adam Lerer, Adam Richardson, Ahmed El-Kishky, Aiden Low, Alec Helyar,
+Aleksander Madry, Alex Beutel, Alex Carney, Alex Iftimie, Alex Karpenko, Alex Tachard Passos, Alexander Neitz,
+Alexander Prokofiev, Alexander Wei, Allison Tam, Ally Bennett, Ananya Kumar, Andre Saraiva, Andrea Vallone,
+Andrew Duberstein, Andrew Kondrich, Andrey Mishchenko, Andy Applebaum, Angela Jiang, Ashvin Nair, Barret
+Zoph, Behrooz Ghorbani, Ben Rossen, Benjamin Sokolowsky, Boaz Barak, Bob McGrew, Borys Minaiev, Botao
+Hao, Bowen Baker, Brandon Houghton, Brandon McKinzie, Brydon Eastman, Camillo Lugaresi, Cary Bassin, Cary
+Hudson, Chak Ming Li, Charles de Bourcy, Chelsea Voss, Chen Shen, Chong Zhang, Chris Koch, Chris Orsinger,
+Christopher Hesse, Claudia Fischer, Clive Chan, Dan Roberts, Daniel Kappler, Daniel Levy, Daniel Selsam, David
+Dohan, David Farhi, David Mely, David Robinson, Dimitris Tsipras, Doug Li, Dragos Oprica, Eben Freeman,
+Eddie Zhang, Edmund Wong, Elizabeth Proehl, Enoch Cheung, Eric Mitchell, Eric Wallace, Erik Ritter, Evan
+Mays, Fan Wang, Felipe Petroski Such, Filippo Raso, Florencia Leoni, Foivos Tsimpourlas, Francis Song, Fred von
+Lohmann, Freddie Sulit, Geoff Salmon, Giambattista Parascandolo, Gildas Chabot, Grace Zhao, Greg Brockman,
+Guillaume Leclerc, Hadi Salman, Haiming Bao, Hao Sheng, Hart Andrin, Hessam Bagherinezhad, Hongyu Ren,
+Hunter Lightman, Hyung Won Chung, Ian Kivlichan, Ian O’Connell, Ian Osband, Ignasi Clavera Gilaberte, Ilge
+Akkaya, Ilya Kostrikov, Ilya Sutskever, Irina Kofman, Jakub Pachocki, James Lennon, Jason Wei, Jean Harb, Jerry
+Twore, Jiacheng Feng, Jiahui Yu, Jiayi Weng, Jie Tang, Jieqi Yu, Joaquin Quiñonero Candela, Joe Palermo, Joel
+Parish, Johannes Heidecke, John Hallman, John Rizzo, Jonathan Gordon, Jonathan Uesato, Jonathan Ward, Joost
+Huizinga, Julie Wang, Kai Chen, Kai Xiao, Karan Singhal, Karina Nguyen, Karl Cobbe, Katy Shi, Kayla Wood,
+Kendra Rimbach, Keren Gu-Lemberg, Kevin Liu, Kevin Lu, Kevin Stone, Kevin Yu, Lama Ahmad, Lauren Yang,
+Leo Liu, Leon Maksin, Leyton Ho, Liam Fedus, Lilian Weng, Linden Li, Lindsay McCallum, Lindsey Held, Lorenz
+Kuhn, Lukas Kondraciuk, Lukasz Kaiser, Luke Metz, Madelaine Boyd, Maja Trebacz, Manas Joglekar, Mark Chen,
+Marko Tintor, Mason Meyer, Matt Jones, Matt Kaufer, Max Schwarzer, Meghan Shah, Mehmet Yatbaz, Melody Y.
+Guan, Mengyuan Xu, Mengyuan Yan, Mia Glaese, Mianna Chen, Michael Lampe, Michael Malek, Michele Wang,
+Michelle Fradin, Mike McClay, Mikhail Pavlov, Miles Wang, Mingxuan Wang, Mira Murati, Mo Bavarian, Mostafa
+Rohaninejad, Nat McAleese, Neil Chowdhury, Neil Chowdhury, Nick Ryder, Nikolas Tezak, Noam Brown, Ofir
+Nachum, Oleg Boiko, Oleg Murk, Olivia Watkins, Patrick Chao, Paul Ashbourne, Pavel Izmailov, Peter Zhokhov,
+Rachel Dias, Rahul Arora, Randall Lin, Rapha Gontijo Lopes, Raz Gaon, Reah Miyara, Reimar Leike, Renny
+Hwang, Rhythm Garg, Robin Brown, Roshan James, Rui Shu, Ryan Cheu, Ryan Greene, Saachi Jain, Sam Altman,
+Sam Toizer, Sam Toyer, Samuel Miserendino, Sandhini Agarwal, Santiago Hernandez, Sasha Baker, Scott McKinney,
+Scottie Yan, Shengjia Zhao, Shengli Hu, Shibani Santurkar, Shraman Ray Chaudhuri, Shuyuan Zhang, Siyuan Fu,
+Spencer Papay, Steph Lin, Suchir Balaji, Suvansh Sanjeev, Szymon Sidor, Tal Broda, Aidan Clark, Tao Wang, Taylor
+Gordon, Ted Sanders, Tejal Patwardhan, Thibault Sottiaux, Thomas Degry, Thomas Dimson, Tianhao Zheng, Timur
+Garipov, Tom Stasi, Trapit Bansal, Trevor Creech, Troy Peterson, Tyna Eloundou, Valerie Qi, Vineet Kosaraju,
+Vinnie Monaco, Vitchyr Pong, Vlad Fomenko, Weiyi Zheng, Wenda Zhou, Wes McCabe, Wojciech Zaremba, Yann
+Dubois, Yinghai Lu, Yining Chen, Young Cha, Yu Bai, Yuchen He, Yuchen Zhang, Yunyun Wang, Zheng Shao, and
+Zhuohan Li. Openai o1 system card, 2024. URL https://arxiv.org/abs/2412.16720.
+Ofir Press, Muru Zhang, Sewon Min, Ludwig Schmidt, Noah Smith, and Mike Lewis. Measuring and narrowing the
+
+17
+
+compositionality gap in language models. In Houda Bouamor, Juan Pino, and Kalika Bali (eds.), Findings of the
+Association for Computational Linguistics: EMNLP 2023, pp. 5687–5711, Singapore, December 2023. Association
+for Computational Linguistics. doi: 10.18653/v1/2023.findings-emnlp.378. URL https://aclanthology.org/2023.
+findings-emnlp.378/.
+Yuxiao Qu, Anikait Singh, Yoonho Lee, Amrith Setlur, Ruslan Salakhutdinov, Chelsea Finn, and Aviral Kumar. Rlad:
+Training llms to discover abstractions for solving reasoning problems, 2025. URL https://arxiv.org/abs/2510.02263.
+Yuxiao Qu, Amrith Setlur, Virginia Smith, Ruslan Salakhutdinov, and Aviral Kumar. Pope: Learning to reason on
+hard problems via privileged on-policy exploration, 2026. URL https://arxiv.org/abs/2601.18779.
+Vedant Shah, Johan Obando-Ceron, Vineet Jain, Brian Bartoldson, Bhavya Kailkhura, Sarthak Mittal, Glen Berseth,
+Pablo Samuel Castro, Yoshua Bengio, Nikolay Malkin, Moksh Jain, Siddarth Venkatraman, and Aaron Courville. A
+comedy of estimators: On kl regularization in rl training of llms, 2026. URL https://arxiv.org/abs/2512.21852.
+Zhihong Shao, Peiyi Wang, Qihao Zhu, Runxin Xu, Junxiao Song, Xiao Bi, Haowei Zhang, Mingchuan Zhang, Y. K.
+Li, Y. Wu, and Daya Guo. Deepseekmath: Pushing the limits of mathematical reasoning in open language models,
+2024. URL https://arxiv.org/abs/2402.03300.
+Idan Shenfeld, Mehul Damani, Jonas Hübotter, and Pulkit Agrawal. Self-distillation enables continual learning, 2026.
+URL https://arxiv.org/abs/2601.19897.
+Aaditya Singh, Adam Fry, Adam Perelman, Adam Tart, Adi Ganesh, Ahmed El-Kishky, Aidan McLaughlin, Aiden
+Low, AJ Ostrow, Akhila Ananthram, Akshay Nathan, Alan Luo, Alec Helyar, Aleksander Madry, Aleksandr
+Efremov, Aleksandra Spyra, Alex Baker-Whitcomb, Alex Beutel, Alex Karpenko, Alex Makelov, Alex Neitz, Alex
+Wei, Alexandra Barr, Alexandre Kirchmeyer, Alexey Ivanov, Alexi Christakis, Alistair Gillespie, Allison Tam, Ally
+Bennett, Alvin Wan, Alyssa Huang, Amy McDonald Sandjideh, Amy Yang, Ananya Kumar, Andre Saraiva, Andrea
+Vallone, Andrei Gheorghe, Andres Garcia Garcia, Andrew Braunstein, Andrew Liu, Andrew Schmidt, Andrey
+Mereskin, Andrey Mishchenko, Andy Applebaum, Andy Rogerson, Ann Rajan, Annie Wei, Anoop Kotha, Anubha
+Srivastava, Anushree Agrawal, Arun Vijayvergiya, Ashley Tyra, Ashvin Nair, Avi Nayak, Ben Eggers, Bessie Ji,
+Beth Hoover, Bill Chen, Blair Chen, Boaz Barak, Borys Minaiev, Botao Hao, Bowen Baker, Brad Lightcap, Brandon
+McKinzie, Brandon Wang, Brendan Quinn, Brian Fioca, Brian Hsu, Brian Yang, Brian Yu, Brian Zhang, Brittany
+Brenner, Callie Riggins Zetino, Cameron Raymond, Camillo Lugaresi, Carolina Paz, Cary Hudson, Cedric Whitney,
+Chak Li, Charles Chen, Charlotte Cole, Chelsea Voss, Chen Ding, Chen Shen, Chengdu Huang, Chris Colby, Chris
+Hallacy, Chris Koch, Chris Lu, Christina Kaplan, Christina Kim, CJ Minott-Henriques, Cliff Frey, Cody Yu, Coley
+Czarnecki, Colin Reid, Colin Wei, Cory Decareaux, Cristina Scheau, Cyril Zhang, Cyrus Forbes, Da Tang, Dakota
+Goldberg, Dan Roberts, Dana Palmie, Daniel Kappler, Daniel Levine, Daniel Wright, Dave Leo, David Lin, David
+Robinson, Declan Grabb, Derek Chen, Derek Lim, Derek Salama, Dibya Bhattacharjee, Dimitris Tsipras, Dinghua
+Li, Dingli Yu, DJ Strouse, Drew Williams, Dylan Hunn, Ed Bayes, Edwin Arbus, Ekin Akyurek, Elaine Ya Le, Elana
+Widmann, Eli Yani, Elizabeth Proehl, Enis Sert, Enoch Cheung, Eri Schwartz, Eric Han, Eric Jiang, Eric Mitchell,
+Eric Sigler, Eric Wallace, Erik Ritter, Erin Kavanaugh, Evan Mays, Evgenii Nikishin, Fangyuan Li, Felipe Petroski
+Such, Filipe de Avila Belbute Peres, Filippo Raso, Florent Bekerman, Foivos Tsimpourlas, Fotis Chantzis, Francis
+Song, Francis Zhang, Gaby Raila, Garrett McGrath, Gary Briggs, Gary Yang, Giambattista Parascandolo, Gildas
+Chabot, Grace Kim, Grace Zhao, Gregory Valiant, Guillaume Leclerc, Hadi Salman, Hanson Wang, Hao Sheng,
+Haoming Jiang, Haoyu Wang, Haozhun Jin, Harshit Sikchi, Heather Schmidt, Henry Aspegren, Honglin Chen, Huida
+Qiu, Hunter Lightman, Ian Covert, Ian Kivlichan, Ian Silber, Ian Sohl, Ibrahim Hammoud, Ignasi Clavera, Ikai Lan,
+Ilge Akkaya, Ilya Kostrikov, Irina Kofman, Isak Etinger, Ishaan Singal, Jackie Hehir, Jacob Huh, Jacqueline Pan,
+Jake Wilczynski, Jakub Pachocki, James Lee, James Quinn, Jamie Kiros, Janvi Kalra, Jasmyn Samaroo, Jason
+Wang, Jason Wolfe, Jay Chen, Jay Wang, Jean Harb, Jeffrey Han, Jeffrey Wang, Jennifer Zhao, Jeremy Chen,
+Jerene Yang, Jerry Tworek, Jesse Chand, Jessica Landon, Jessica Liang, Ji Lin, Jiancheng Liu, Jianfeng Wang, Jie
+Tang, Jihan Yin, Joanne Jang, Joel Morris, Joey Flynn, Johannes Ferstad, Johannes Heidecke, John Fishbein, John
+Hallman, Jonah Grant, Jonathan Chien, Jonathan Gordon, Jongsoo Park, Jordan Liss, Jos Kraaijeveld, Joseph
+Guay, Joseph Mo, Josh Lawson, Josh McGrath, Joshua Vendrow, Joy Jiao, Julian Lee, Julie Steele, Julie Wang,
+Junhua Mao, Kai Chen, Kai Hayashi, Kai Xiao, Kamyar Salahi, Kan Wu, Karan Sekhri, Karan Sharma, Karan
+Singhal, Karen Li, Kenny Nguyen, Keren Gu-Lemberg, Kevin King, Kevin Liu, Kevin Stone, Kevin Yu, Kristen
+Ying, Kristian Georgiev, Kristie Lim, Kushal Tirumala, Kyle Miller, Lama Ahmad, Larry Lv, Laura Clare, Laurance
+Fauconnet, Lauren Itow, Lauren Yang, Laurentia Romaniuk, Leah Anise, Lee Byron, Leher Pathak, Leon Maksin,
+Leyan Lo, Leyton Ho, Li Jing, Liang Wu, Liang Xiong, Lien Mamitsuka, Lin Yang, Lindsay McCallum, Lindsey
+Held, Liz Bourgeois, Logan Engstrom, Lorenz Kuhn, Louis Feuvrier, Lu Zhang, Lucas Switzer, Lukas Kondraciuk,
+Lukasz Kaiser, Manas Joglekar, Mandeep Singh, Mandip Shah, Manuka Stratta, Marcus Williams, Mark Chen,
+Mark Sun, Marselus Cayton, Martin Li, Marvin Zhang, Marwan Aljubeh, Matt Nichols, Matthew Haines, Max
+Schwarzer, Mayank Gupta, Meghan Shah, Melody Huang, Meng Dong, Mengqing Wang, Mia Glaese, Micah Carroll,
+
+18
+
+Michael Lampe, Michael Malek, Michael Sharman, Michael Zhang, Michele Wang, Michelle Pokrass, Mihai Florian,
+Mikhail Pavlov, Miles Wang, Ming Chen, Mingxuan Wang, Minnia Feng, Mo Bavarian, Molly Lin, Moose Abdool,
+Mostafa Rohaninejad, Nacho Soto, Natalie Staudacher, Natan LaFontaine, Nathan Marwell, Nelson Liu, Nick
+Preston, Nick Turley, Nicklas Ansman, Nicole Blades, Nikil Pancha, Nikita Mikhaylin, Niko Felix, Nikunj Handa,
+Nishant Rai, Nitish Keskar, Noam Brown, Ofir Nachum, Oleg Boiko, Oleg Murk, Olivia Watkins, Oona Gleeson,
+Pamela Mishkin, Patryk Lesiewicz, Paul Baltescu, Pavel Belov, Peter Zhokhov, Philip Pronin, Phillip Guo, Phoebe
+Thacker, Qi Liu, Qiming Yuan, Qinghua Liu, Rachel Dias, Rachel Puckett, Rahul Arora, Ravi Teja Mullapudi, Raz
+Gaon, Reah Miyara, Rennie Song, Rishabh Aggarwal, RJ Marsan, Robel Yemiru, Robert Xiong, Rohan Kshirsagar,
+Rohan Nuttall, Roman Tsiupa, Ronen Eldan, Rose Wang, Roshan James, Roy Ziv, Rui Shu, Ruslan Nigmatullin,
+Saachi Jain, Saam Talaie, Sam Altman, Sam Arnesen, Sam Toizer, Sam Toyer, Samuel Miserendino, Sandhini
+Agarwal, Sarah Yoo, Savannah Heon, Scott Ethersmith, Sean Grove, Sean Taylor, Sebastien Bubeck, Sever Banesiu,
+Shaokyi Amdo, Shengjia Zhao, Sherwin Wu, Shibani Santurkar, Shiyu Zhao, Shraman Ray Chaudhuri, Shreyas
+Krishnaswamy, Shuaiqi, Xia, Shuyang Cheng, Shyamal Anadkat, Simón Posada Fishman, Simon Tobin, Siyuan Fu,
+Somay Jain, Song Mei, Sonya Egoian, Spencer Kim, Spug Golden, SQ Mah, Steph Lin, Stephen Imm, Steve Sharpe,
+Steve Yadlowsky, Sulman Choudhry, Sungwon Eum, Suvansh Sanjeev, Tabarak Khan, Tal Stramer, Tao Wang, Tao
+Xin, Tarun Gogineni, Taya Christianson, Ted Sanders, Tejal Patwardhan, Thomas Degry, Thomas Shadwell, Tianfu
+Fu, Tianshi Gao, Timur Garipov, Tina Sriskandarajah, Toki Sherbakov, Tomer Kaftan, Tomo Hiratsuka, Tongzhou
+Wang, Tony Song, Tony Zhao, Troy Peterson, Val Kharitonov, Victoria Chernova, Vineet Kosaraju, Vishal Kuo,
+Vitchyr Pong, Vivek Verma, Vlad Petrov, Wanning Jiang, Weixing Zhang, Wenda Zhou, Wenlei Xie, Wenting Zhan,
+Wes McCabe, Will DePue, Will Ellsworth, Wulfie Bain, Wyatt Thompson, Xiangning Chen, Xiangyu Qi, Xin Xiang,
+Xinwei Shi, Yann Dubois, Yaodong Yu, Yara Khakbaz, Yifan Wu, Yilei Qian, Yin Tat Lee, Yinbo Chen, Yizhen
+Zhang, Yizhong Xiong, Yonglong Tian, Young Cha, Yu Bai, Yu Yang, Yuan Yuan, Yuanzhi Li, Yufeng Zhang,
+Yuguang Yang, Yujia Jin, Yun Jiang, Yunyun Wang, Yushi Wang, Yutian Liu, Zach Stubenvoll, Zehao Dou, Zheng
+Wu, and Zhigang Wang. Openai gpt-5 system card, 2025. URL https://arxiv.org/abs/2601.03267.
+Charlie Snell, Dan Klein, and Ruiqi Zhong. Learning by distilling context, 2022. URL https://arxiv.org/abs/2209.
+15189.
+Alessandro Sordoni, Xingdi Yuan, Marc-Alexandre Côté, Matheus Pereira, Adam Trischler, Ziang Xiao, Arian Hosseini,
+Friederike Niedtner, and Nicolas Le Roux. Joint prompt optimization of stacked llms using variational inference,
+2023. URL https://arxiv.org/abs/2306.12509.
+Richard S Sutton, David McAllester, Satinder Singh, and Yishay Mansour. Policy gradient methods for reinforcement
+learning with function approximation. Advances in neural information processing systems, 12, 1999.
+Gemini Team, Rohan Anil, Sebastian Borgeaud, Jean-Baptiste Alayrac, Jiahui Yu, Radu Soricut, Johan Schalkwyk,
+Andrew M. Dai, Anja Hauth, Katie Millican, David Silver, Melvin Johnson, Ioannis Antonoglou, Julian Schrittwieser,
+Amelia Glaese, Jilin Chen, Emily Pitler, Timothy Lillicrap, Angeliki Lazaridou, Orhan Firat, James Molloy, Michael
+Isard, Paul R. Barham, Tom Hennigan, Benjamin Lee, Fabio Viola, Malcolm Reynolds, Yuanzhong Xu, Ryan
+Doherty, Eli Collins, Clemens Meyer, Eliza Rutherford, Erica Moreira, Kareem Ayoub, Megha Goel, Jack Krawczyk,
+Cosmo Du, Ed Chi, Heng-Tze Cheng, Eric Ni, Purvi Shah, Patrick Kane, Betty Chan, Manaal Faruqui, Aliaksei
+Severyn, Hanzhao Lin, YaGuang Li, Yong Cheng, Abe Ittycheriah, Mahdis Mahdieh, Mia Chen, Pei Sun, Dustin
+Tran, Sumit Bagri, Balaji Lakshminarayanan, Jeremiah Liu, Andras Orban, Fabian Güra, Hao Zhou, Xinying
+Song, Aurelien Boffy, Harish Ganapathy, Steven Zheng, HyunJeong Choe, Ágoston Weisz, Tao Zhu, Yifeng Lu,
+Siddharth Gopal, Jarrod Kahn, Maciej Kula, Jeff Pitman, Rushin Shah, Emanuel Taropa, Majd Al Merey, Martin
+Baeuml, Zhifeng Chen, Laurent El Shafey, Yujing Zhang, Olcan Sercinoglu, George Tucker, Enrique Piqueras,
+Maxim Krikun, Iain Barr, Nikolay Savinov, Ivo Danihelka, Becca Roelofs, Anaïs White, Anders Andreassen, Tamara
+von Glehn, Lakshman Yagati, Mehran Kazemi, Lucas Gonzalez, Misha Khalman, Jakub Sygnowski, Alexandre
+Frechette, Charlotte Smith, Laura Culp, Lev Proleev, Yi Luan, Xi Chen, James Lottes, Nathan Schucher, Federico
+Lebron, Alban Rrustemi, Natalie Clay, Phil Crone, Tomas Kocisky, Jeffrey Zhao, Bartek Perz, Dian Yu, Heidi
+Howard, Adam Bloniarz, Jack W. Rae, Han Lu, Laurent Sifre, Marcello Maggioni, Fred Alcober, Dan Garrette,
+Megan Barnes, Shantanu Thakoor, Jacob Austin, Gabriel Barth-Maron, William Wong, Rishabh Joshi, Rahma
+Chaabouni, Deeni Fatiha, Arun Ahuja, Gaurav Singh Tomar, Evan Senter, Martin Chadwick, Ilya Kornakov, Nithya
+Attaluri, Iñaki Iturrate, Ruibo Liu, Yunxuan Li, Sarah Cogan, Jeremy Chen, Chao Jia, Chenjie Gu, Qiao Zhang,
+Jordan Grimstad, Ale Jakse Hartman, Xavier Garcia, Thanumalayan Sankaranarayana Pillai, Jacob Devlin, Michael
+Laskin, Diego de Las Casas, Dasha Valter, Connie Tao, Lorenzo Blanco, Adrià Puigdomènech Badia, David Reitter,
+Mianna Chen, Jenny Brennan, Clara Rivera, Sergey Brin, Shariq Iqbal, Gabriela Surita, Jane Labanowski, Abhi Rao,
+Stephanie Winkler, Emilio Parisotto, Yiming Gu, Kate Olszewska, Ravi Addanki, Antoine Miech, Annie Louis, Denis
+Teplyashin, Geoff Brown, Elliot Catt, Jan Balaguer, Jackie Xiang, Pidong Wang, Zoe Ashwood, Anton Briukhov,
+Albert Webson, Sanjay Ganapathy, Smit Sanghavi, Ajay Kannan, Ming-Wei Chang, Axel Stjerngren, Josip Djolonga,
+Yuting Sun, Ankur Bapna, Matthew Aitchison, Pedram Pejman, Henryk Michalewski, Tianhe Yu, Cindy Wang,
+
+19
+
+Juliette Love, Junwhan Ahn, Dawn Bloxwich, Kehang Han, Peter Humphreys, Thibault Sellam, James Bradbury,
+Varun Godbole, Sina Samangooei, Bogdan Damoc, Alex Kaskasoli, Sébastien M. R. Arnold, Vijay Vasudevan,
+Shubham Agrawal, Jason Riesa, Dmitry Lepikhin, Richard Tanburn, Srivatsan Srinivasan, Hyeontaek Lim, Sarah
+Hodkinson, Pranav Shyam, Johan Ferret, Steven Hand, Ankush Garg, Tom Le Paine, Jian Li, Yujia Li, Minh Giang,
+Alexander Neitz, Zaheer Abbas, Sarah York, Machel Reid, Elizabeth Cole, Aakanksha Chowdhery, Dipanjan Das,
+Dominika Rogozińska, Vitaliy Nikolaev, Pablo Sprechmann, Zachary Nado, Lukas Zilka, Flavien Prost, Luheng
+He, Marianne Monteiro, Gaurav Mishra, Chris Welty, Josh Newlan, Dawei Jia, Miltiadis Allamanis, Clara Huiyi
+Hu, Raoul de Liedekerke, Justin Gilmer, Carl Saroufim, Shruti Rijhwani, Shaobo Hou, Disha Shrivastava, Anirudh
+Baddepudi, Alex Goldin, Adnan Ozturel, Albin Cassirer, Yunhan Xu, Daniel Sohn, Devendra Sachan, Reinald Kim
+Amplayo, Craig Swanson, Dessie Petrova, Shashi Narayan, Arthur Guez, Siddhartha Brahma, Jessica Landon,
+Miteyan Patel, Ruizhe Zhao, Kevin Villela, Luyu Wang, Wenhao Jia, Matthew Rahtz, Mai Giménez, Legg Yeung,
+James Keeling, Petko Georgiev, Diana Mincu, Boxi Wu, Salem Haykal, Rachel Saputro, Kiran Vodrahalli, James
+Qin, Zeynep Cankara, Abhanshu Sharma, Nick Fernando, Will Hawkins, Behnam Neyshabur, Solomon Kim, Adrian
+Hutter, Priyanka Agrawal, Alex Castro-Ros, George van den Driessche, Tao Wang, Fan Yang, Shuo yiin Chang,
+Paul Komarek, Ross McIlroy, Mario Lučić, Guodong Zhang, Wael Farhan, Michael Sharman, Paul Natsev, Paul
+Michel, Yamini Bansal, Siyuan Qiao, Kris Cao, Siamak Shakeri, Christina Butterfield, Justin Chung, Paul Kishan
+Rubenstein, Shivani Agrawal, Arthur Mensch, Kedar Soparkar, Karel Lenc, Timothy Chung, Aedan Pope, Loren
+Maggiore, Jackie Kay, Priya Jhakra, Shibo Wang, Joshua Maynez, Mary Phuong, Taylor Tobin, Andrea Tacchetti,
+Maja Trebacz, Kevin Robinson, Yash Katariya, Sebastian Riedel, Paige Bailey, Kefan Xiao, Nimesh Ghelani, Lora
+Aroyo, Ambrose Slone, Neil Houlsby, Xuehan Xiong, Zhen Yang, Elena Gribovskaya, Jonas Adler, Mateo Wirth,
+Lisa Lee, Music Li, Thais Kagohara, Jay Pavagadhi, Sophie Bridgers, Anna Bortsova, Sanjay Ghemawat, Zafarali
+Ahmed, Tianqi Liu, Richard Powell, Vijay Bolina, Mariko Iinuma, Polina Zablotskaia, James Besley, Da-Woon
+Chung, Timothy Dozat, Ramona Comanescu, Xiance Si, Jeremy Greer, Guolong Su, Martin Polacek, Raphaël Lopez
+Kaufman, Simon Tokumine, Hexiang Hu, Elena Buchatskaya, Yingjie Miao, Mohamed Elhawaty, Aditya Siddhant,
+Nenad Tomasev, Jinwei Xing, Christina Greer, Helen Miller, Shereen Ashraf, Aurko Roy, Zizhao Zhang, Ada Ma,
+Angelos Filos, Milos Besta, Rory Blevins, Ted Klimenko, Chih-Kuan Yeh, Soravit Changpinyo, Jiaqi Mu, Oscar
+Chang, Mantas Pajarskas, Carrie Muir, Vered Cohen, Charline Le Lan, Krishna Haridasan, Amit Marathe, Steven
+Hansen, Sholto Douglas, Rajkumar Samuel, Mingqiu Wang, Sophia Austin, Chang Lan, Jiepu Jiang, Justin Chiu,
+Jaime Alonso Lorenzo, Lars Lowe Sjösund, Sébastien Cevey, Zach Gleicher, Thi Avrahami, Anudhyan Boral, Hansa
+Srinivasan, Vittorio Selo, Rhys May, Konstantinos Aisopos, Léonard Hussenot, Livio Baldini Soares, Kate Baumli,
+Michael B. Chang, Adrià Recasens, Ben Caine, Alexander Pritzel, Filip Pavetic, Fabio Pardo, Anita Gergely, Justin
+Frye, Vinay Ramasesh, Dan Horgan, Kartikeya Badola, Nora Kassner, Subhrajit Roy, Ethan Dyer, Víctor Campos
+Campos, Alex Tomala, Yunhao Tang, Dalia El Badawy, Elspeth White, Basil Mustafa, Oran Lang, Abhishek Jindal,
+Sharad Vikram, Zhitao Gong, Sergi Caelles, Ross Hemsley, Gregory Thornton, Fangxiaoyu Feng, Wojciech Stokowiec,
+Ce Zheng, Phoebe Thacker, Çağlar Ünlü, Zhishuai Zhang, Mohammad Saleh, James Svensson, Max Bileschi, Piyush
+Patil, Ankesh Anand, Roman Ring, Katerina Tsihlas, Arpi Vezer, Marco Selvi, Toby Shevlane, Mikel Rodriguez,
+Tom Kwiatkowski, Samira Daruki, Keran Rong, Allan Dafoe, Nicholas FitzGerald, Keren Gu-Lemberg, Mina Khan,
+Lisa Anne Hendricks, Marie Pellat, Vladimir Feinberg, James Cobon-Kerr, Tara Sainath, Maribeth Rauh, Sayed Hadi
+Hashemi, Richard Ives, Yana Hasson, Eric Noland, Yuan Cao, Nathan Byrd, Le Hou, Qingze Wang, Thibault
+Sottiaux, Michela Paganini, Jean-Baptiste Lespiau, Alexandre Moufarek, Samer Hassan, Kaushik Shivakumar, Joost
+van Amersfoort, Amol Mandhane, Pratik Joshi, Anirudh Goyal, Matthew Tung, Andrew Brock, Hannah Sheahan,
+Vedant Misra, Cheng Li, Nemanja Rakićević, Mostafa Dehghani, Fangyu Liu, Sid Mittal, Junhyuk Oh, Seb Noury,
+Eren Sezener, Fantine Huot, Matthew Lamm, Nicola De Cao, Charlie Chen, Sidharth Mudgal, Romina Stella, Kevin
+Brooks, Gautam Vasudevan, Chenxi Liu, Mainak Chain, Nivedita Melinkeri, Aaron Cohen, Venus Wang, Kristie
+Seymore, Sergey Zubkov, Rahul Goel, Summer Yue, Sai Krishnakumaran, Brian Albert, Nate Hurley, Motoki Sano,
+Anhad Mohananey, Jonah Joughin, Egor Filonov, Tomasz Kępa, Yomna Eldawy, Jiawern Lim, Rahul Rishi, Shirin
+Badiezadegan, Taylor Bos, Jerry Chang, Sanil Jain, Sri Gayatri Sundara Padmanabhan, Subha Puttagunta, Kalpesh
+Krishna, Leslie Baker, Norbert Kalb, Vamsi Bedapudi, Adam Kurzrok, Shuntong Lei, Anthony Yu, Oren Litvin,
+Xiang Zhou, Zhichun Wu, Sam Sobell, Andrea Siciliano, Alan Papir, Robby Neale, Jonas Bragagnolo, Tej Toor,
+Tina Chen, Valentin Anklin, Feiran Wang, Richie Feng, Milad Gholami, Kevin Ling, Lijuan Liu, Jules Walter,
+Hamid Moghaddam, Arun Kishore, Jakub Adamek, Tyler Mercado, Jonathan Mallinson, Siddhinita Wandekar,
+Stephen Cagle, Eran Ofek, Guillermo Garrido, Clemens Lombriser, Maksim Mukha, Botu Sun, Hafeezul Rahman
+Mohammad, Josip Matak, Yadi Qian, Vikas Peswani, Pawel Janus, Quan Yuan, Leif Schelin, Oana David, Ankur
+Garg, Yifan He, Oleksii Duzhyi, Anton Älgmyr, Timothée Lottaz, Qi Li, Vikas Yadav, Luyao Xu, Alex Chinien,
+Rakesh Shivanna, Aleksandr Chuklin, Josie Li, Carrie Spadine, Travis Wolfe, Kareem Mohamed, Subhabrata Das,
+Zihang Dai, Kyle He, Daniel von Dincklage, Shyam Upadhyay, Akanksha Maurya, Luyan Chi, Sebastian Krause,
+Khalid Salama, Pam G Rabinovitch, Pavan Kumar Reddy M, Aarush Selvan, Mikhail Dektiarev, Golnaz Ghiasi,
+Erdem Guven, Himanshu Gupta, Boyi Liu, Deepak Sharma, Idan Heimlich Shtacher, Shachi Paul, Oscar Akerlund,
+François-Xavier Aubet, Terry Huang, Chen Zhu, Eric Zhu, Elico Teixeira, Matthew Fritze, Francesco Bertolini,
+Liana-Eleonora Marinescu, Martin Bölle, Dominik Paulus, Khyatti Gupta, Tejasi Latkar, Max Chang, Jason Sanders,
+
+20
+
+Roopa Wilson, Xuewei Wu, Yi-Xuan Tan, Lam Nguyen Thiet, Tulsee Doshi, Sid Lall, Swaroop Mishra, Wanming
+Chen, Thang Luong, Seth Benjamin, Jasmine Lee, Ewa Andrejczuk, Dominik Rabiej, Vipul Ranjan, Krzysztof Styrc,
+Pengcheng Yin, Jon Simon, Malcolm Rose Harriott, Mudit Bansal, Alexei Robsky, Geoff Bacon, David Greene,
+Daniil Mirylenka, Chen Zhou, Obaid Sarvana, Abhimanyu Goyal, Samuel Andermatt, Patrick Siegler, Ben Horn,
+Assaf Israel, Francesco Pongetti, Chih-Wei "Louis" Chen, Marco Selvatici, Pedro Silva, Kathie Wang, Jackson
+Tolins, Kelvin Guu, Roey Yogev, Xiaochen Cai, Alessandro Agostini, Maulik Shah, Hung Nguyen, Noah Ó Donnaile,
+Sébastien Pereira, Linda Friso, Adam Stambler, Adam Kurzrok, Chenkai Kuang, Yan Romanikhin, Mark Geller,
+ZJ Yan, Kane Jang, Cheng-Chun Lee, Wojciech Fica, Eric Malmi, Qijun Tan, Dan Banica, Daniel Balle, Ryan Pham,
+Yanping Huang, Diana Avram, Hongzhi Shi, Jasjot Singh, Chris Hidey, Niharika Ahuja, Pranab Saxena, Dan Dooley,
+Srividya Pranavi Potharaju, Eileen O’Neill, Anand Gokulchandran, Ryan Foley, Kai Zhao, Mike Dusenberry, Yuan
+Liu, Pulkit Mehta, Ragha Kotikalapudi, Chalence Safranek-Shrader, Andrew Goodman, Joshua Kessinger, Eran
+Globen, Prateek Kolhar, Chris Gorgolewski, Ali Ibrahim, Yang Song, Ali Eichenbaum, Thomas Brovelli, Sahitya
+Potluri, Preethi Lahoti, Cip Baetu, Ali Ghorbani, Charles Chen, Andy Crawford, Shalini Pal, Mukund Sridhar,
+Petru Gurita, Asier Mujika, Igor Petrovski, Pierre-Louis Cedoz, Chenmei Li, Shiyuan Chen, Niccolò Dal Santo,
+Siddharth Goyal, Jitesh Punjabi, Karthik Kappaganthu, Chester Kwak, Pallavi LV, Sarmishta Velury, Himadri
+Choudhury, Jamie Hall, Premal Shah, Ricardo Figueira, Matt Thomas, Minjie Lu, Ting Zhou, Chintu Kumar,
+Thomas Jurdi, Sharat Chikkerur, Yenai Ma, Adams Yu, Soo Kwak, Victor Ähdel, Sujeevan Rajayogam, Travis
+Choma, Fei Liu, Aditya Barua, Colin Ji, Ji Ho Park, Vincent Hellendoorn, Alex Bailey, Taylan Bilal, Huanjie
+Zhou, Mehrdad Khatir, Charles Sutton, Wojciech Rzadkowski, Fiona Macintosh, Roopali Vij, Konstantin Shagin,
+Paul Medina, Chen Liang, Jinjing Zhou, Pararth Shah, Yingying Bi, Attila Dankovics, Shipra Banga, Sabine
+Lehmann, Marissa Bredesen, Zifan Lin, John Eric Hoffmann, Jonathan Lai, Raynald Chung, Kai Yang, Nihal
+Balani, Arthur Bražinskas, Andrei Sozanschi, Matthew Hayes, Héctor Fernández Alcalde, Peter Makarov, Will Chen,
+Antonio Stella, Liselotte Snijders, Michael Mandl, Ante Kärrman, Paweł Nowak, Xinyi Wu, Alex Dyck, Krishnan
+Vaidyanathan, Raghavender R, Jessica Mallet, Mitch Rudominer, Eric Johnston, Sushil Mittal, Akhil Udathu, Janara
+Christensen, Vishal Verma, Zach Irving, Andreas Santucci, Gamaleldin Elsayed, Elnaz Davoodi, Marin Georgiev,
+Ian Tenney, Nan Hua, Geoffrey Cideron, Edouard Leurent, Mahmoud Alnahlawi, Ionut Georgescu, Nan Wei, Ivy
+Zheng, Dylan Scandinaro, Heinrich Jiang, Jasper Snoek, Mukund Sundararajan, Xuezhi Wang, Zack Ontiveros,
+Itay Karo, Jeremy Cole, Vinu Rajashekhar, Lara Tumeh, Eyal Ben-David, Rishub Jain, Jonathan Uesato, Romina
+Datta, Oskar Bunyan, Shimu Wu, John Zhang, Piotr Stanczyk, Ye Zhang, David Steiner, Subhajit Naskar, Michael
+Azzam, Matthew Johnson, Adam Paszke, Chung-Cheng Chiu, Jaume Sanchez Elias, Afroz Mohiuddin, Faizan
+Muhammad, Jin Miao, Andrew Lee, Nino Vieillard, Jane Park, Jiageng Zhang, Jeff Stanway, Drew Garmon, Abhijit
+Karmarkar, Zhe Dong, Jong Lee, Aviral Kumar, Luowei Zhou, Jonathan Evens, William Isaac, Geoffrey Irving,
+Edward Loper, Michael Fink, Isha Arkatkar, Nanxin Chen, Izhak Shafran, Ivan Petrychenko, Zhe Chen, Johnson Jia,
+Anselm Levskaya, Zhenkai Zhu, Peter Grabowski, Yu Mao, Alberto Magni, Kaisheng Yao, Javier Snaider, Norman
+Casagrande, Evan Palmer, Paul Suganthan, Alfonso Castaño, Irene Giannoumis, Wooyeol Kim, Mikołaj Rybiński,
+Ashwin Sreevatsa, Jennifer Prendki, David Soergel, Adrian Goedeckemeyer, Willi Gierke, Mohsen Jafari, Meenu
+Gaba, Jeremy Wiesner, Diana Gage Wright, Yawen Wei, Harsha Vashisht, Yana Kulizhskaya, Jay Hoover, Maigo
+Le, Lu Li, Chimezie Iwuanyanwu, Lu Liu, Kevin Ramirez, Andrey Khorlin, Albert Cui, Tian LIN, Marcus Wu,
+Ricardo Aguilar, Keith Pallo, Abhishek Chakladar, Ginger Perng, Elena Allica Abellan, Mingyang Zhang, Ishita
+Dasgupta, Nate Kushman, Ivo Penchev, Alena Repina, Xihui Wu, Tom van der Weide, Priya Ponnapalli, Caroline
+Kaplan, Jiri Simsa, Shuangfeng Li, Olivier Dousse, Fan Yang, Jeff Piper, Nathan Ie, Rama Pasumarthi, Nathan
+Lintz, Anitha Vijayakumar, Daniel Andor, Pedro Valenzuela, Minnie Lui, Cosmin Paduraru, Daiyi Peng, Katherine
+Lee, Shuyuan Zhang, Somer Greene, Duc Dung Nguyen, Paula Kurylowicz, Cassidy Hardin, Lucas Dixon, Lili
+Janzer, Kiam Choo, Ziqiang Feng, Biao Zhang, Achintya Singhal, Dayou Du, Dan McKinnon, Natasha Antropova,
+Tolga Bolukbasi, Orgad Keller, David Reid, Daniel Finchelstein, Maria Abi Raad, Remi Crocker, Peter Hawkins,
+Robert Dadashi, Colin Gaffney, Ken Franko, Anna Bulanova, Rémi Leblond, Shirley Chung, Harry Askham, Luis C.
+Cobo, Kelvin Xu, Felix Fischer, Jun Xu, Christina Sorokin, Chris Alberti, Chu-Cheng Lin, Colin Evans, Alek
+Dimitriev, Hannah Forbes, Dylan Banarse, Zora Tung, Mark Omernick, Colton Bishop, Rachel Sterneck, Rohan Jain,
+Jiawei Xia, Ehsan Amid, Francesco Piccinno, Xingyu Wang, Praseem Banzal, Daniel J. Mankowitz, Alex Polozov,
+Victoria Krakovna, Sasha Brown, MohammadHossein Bateni, Dennis Duan, Vlad Firoiu, Meghana Thotakuri, Tom
+Natan, Matthieu Geist, Ser tan Girgin, Hui Li, Jiayu Ye, Ofir Roval, Reiko Tojo, Michael Kwong, James Lee-Thorp,
+Christopher Yew, Danila Sinopalnikov, Sabela Ramos, John Mellor, Abhishek Sharma, Kathy Wu, David Miller,
+Nicolas Sonnerat, Denis Vnukov, Rory Greig, Jennifer Beattie, Emily Caveness, Libin Bai, Julian Eisenschlos, Alex
+Korchemniy, Tomy Tsai, Mimi Jasarevic, Weize Kong, Phuong Dao, Zeyu Zheng, Frederick Liu, Fan Yang, Rui Zhu,
+Tian Huey Teh, Jason Sanmiya, Evgeny Gladchenko, Nejc Trdin, Daniel Toyama, Evan Rosen, Sasan Tavakkol,
+Linting Xue, Chen Elkind, Oliver Woodman, John Carpenter, George Papamakarios, Rupert Kemp, Sushant Kafle,
+Tanya Grunina, Rishika Sinha, Alice Talbert, Diane Wu, Denese Owusu-Afriyie, Cosmo Du, Chloe Thornton, Jordi
+Pont-Tuset, Pradyumna Narayana, Jing Li, Saaber Fatehi, John Wieting, Omar Ajmeri, Benigno Uria, Yeongil Ko,
+Laura Knight, Amélie Héliou, Ning Niu, Shane Gu, Chenxi Pang, Yeqing Li, Nir Levine, Ariel Stolovich, Rebeca
+Santamaria-Fernandez, Sonam Goenka, Wenny Yustalim, Robin Strudel, Ali Elqursh, Charlie Deck, Hyo Lee, Zonglin
+
+21
+
+Li, Kyle Levin, Raphael Hoffmann, Dan Holtmann-Rice, Olivier Bachem, Sho Arora, Christy Koh, Soheil Hassas
+Yeganeh, Siim Põder, Mukarram Tariq, Yanhua Sun, Lucian Ionita, Mojtaba Seyedhosseini, Pouya Tafti, Zhiyu Liu,
+Anmol Gulati, Jasmine Liu, Xinyu Ye, Bart Chrzaszcz, Lily Wang, Nikhil Sethi, Tianrun Li, Ben Brown, Shreya
+Singh, Wei Fan, Aaron Parisi, Joe Stanton, Vinod Koverkathu, Christopher A. Choquette-Choo, Yunjie Li, TJ Lu,
+Abe Ittycheriah, Prakash Shroff, Mani Varadarajan, Sanaz Bahargam, Rob Willoughby, David Gaddy, Guillaume
+Desjardins, Marco Cornero, Brona Robenek, Bhavishya Mittal, Ben Albrecht, Ashish Shenoy, Fedor Moiseev, Henrik
+Jacobsson, Alireza Ghaffarkhah, Morgane Rivière, Alanna Walton, Clément Crepy, Alicia Parrish, Zongwei Zhou,
+Clement Farabet, Carey Radebaugh, Praveen Srinivasan, Claudia van der Salm, Andreas Fidjeland, Salvatore
+Scellato, Eri Latorre-Chimoto, Hanna Klimczak-Plucińska, David Bridson, Dario de Cesare, Tom Hudson, Piermaria
+Mendolicchio, Lexi Walker, Alex Morris, Matthew Mauger, Alexey Guseynov, Alison Reid, Seth Odoom, Lucia
+Loher, Victor Cotruta, Madhavi Yenugula, Dominik Grewe, Anastasia Petrushkina, Tom Duerig, Antonio Sanchez,
+Steve Yadlowsky, Amy Shen, Amir Globerson, Lynette Webb, Sahil Dua, Dong Li, Surya Bhupatiraju, Dan Hurt,
+Haroon Qureshi, Ananth Agarwal, Tomer Shani, Matan Eyal, Anuj Khare, Shreyas Rammohan Belle, Lei Wang,
+Chetan Tekur, Mihir Sanjay Kale, Jinliang Wei, Ruoxin Sang, Brennan Saeta, Tyler Liechty, Yi Sun, Yao Zhao,
+Stephan Lee, Pandu Nayak, Doug Fritz, Manish Reddy Vuyyuru, John Aslanides, Nidhi Vyas, Martin Wicke, Xiao
+Ma, Evgenii Eltyshev, Nina Martin, Hardie Cate, James Manyika, Keyvan Amiri, Yelin Kim, Xi Xiong, Kai Kang,
+Florian Luisier, Nilesh Tripuraneni, David Madras, Mandy Guo, Austin Waters, Oliver Wang, Joshua Ainslie, Jason
+Baldridge, Han Zhang, Garima Pruthi, Jakob Bauer, Feng Yang, Riham Mansour, Jason Gelman, Yang Xu, George
+Polovets, Ji Liu, Honglong Cai, Warren Chen, XiangHai Sheng, Emily Xue, Sherjil Ozair, Christof Angermueller,
+Xiaowei Li, Anoop Sinha, Weiren Wang, Julia Wiesinger, Emmanouil Koukoumidis, Yuan Tian, Anand Iyer, Madhu
+Gurumurthy, Mark Goldenson, Parashar Shah, MK Blake, Hongkun Yu, Anthony Urbanowicz, Jennimaria Palomaki,
+Chrisantha Fernando, Ken Durden, Harsh Mehta, Nikola Momchev, Elahe Rahimtoroghi, Maria Georgaki, Amit
+Raul, Sebastian Ruder, Morgan Redshaw, Jinhyuk Lee, Denny Zhou, Komal Jalan, Dinghua Li, Blake Hechtman,
+Parker Schuh, Milad Nasr, Kieran Milan, Vladimir Mikulik, Juliana Franco, Tim Green, Nam Nguyen, Joe Kelley,
+Aroma Mahendru, Andrea Hu, Joshua Howland, Ben Vargas, Jeffrey Hui, Kshitij Bansal, Vikram Rao, Rakesh
+Ghiya, Emma Wang, Ke Ye, Jean Michel Sarr, Melanie Moranski Preston, Madeleine Elish, Steve Li, Aakash Kaku,
+Jigar Gupta, Ice Pasupat, Da-Cheng Juan, Milan Someswar, Tejvi M., Xinyun Chen, Aida Amini, Alex Fabrikant,
+Eric Chu, Xuanyi Dong, Amruta Muthal, Senaka Buthpitiya, Sarthak Jauhari, Nan Hua, Urvashi Khandelwal,
+Ayal Hitron, Jie Ren, Larissa Rinaldi, Shahar Drath, Avigail Dabush, Nan-Jiang Jiang, Harshal Godhia, Uli Sachs,
+Anthony Chen, Yicheng Fan, Hagai Taitelbaum, Hila Noga, Zhuyun Dai, James Wang, Chen Liang, Jenny Hamer,
+Chun-Sung Ferng, Chenel Elkind, Aviel Atias, Paulina Lee, Vít Listík, Mathias Carlen, Jan van de Kerkhof, Marcin
+Pikus, Krunoslav Zaher, Paul Müller, Sasha Zykova, Richard Stefanec, Vitaly Gatsko, Christoph Hirnschall, Ashwin
+Sethi, Xingyu Federico Xu, Chetan Ahuja, Beth Tsai, Anca Stefanoiu, Bo Feng, Keshav Dhandhania, Manish Katyal,
+Akshay Gupta, Atharva Parulekar, Divya Pitta, Jing Zhao, Vivaan Bhatia, Yashodha Bhavnani, Omar Alhadlaq,
+Xiaolin Li, Peter Danenberg, Dennis Tu, Alex Pine, Vera Filippova, Abhipso Ghosh, Ben Limonchik, Bhargava
+Urala, Chaitanya Krishna Lanka, Derik Clive, Yi Sun, Edward Li, Hao Wu, Kevin Hongtongsak, Ianna Li, Kalind
+Thakkar, Kuanysh Omarov, Kushal Majmundar, Michael Alverson, Michael Kucharski, Mohak Patel, Mudit Jain,
+Maksim Zabelin, Paolo Pelagatti, Rohan Kohli, Saurabh Kumar, Joseph Kim, Swetha Sankar, Vineet Shah, Lakshmi
+Ramachandruni, Xiangkai Zeng, Ben Bariach, Laura Weidinger, Tu Vu, Alek Andreev, Antoine He, Kevin Hui,
+Sheleem Kashem, Amar Subramanya, Sissie Hsiao, Demis Hassabis, Koray Kavukcuoglu, Adam Sadovsky, Quoc Le,
+Trevor Strohman, Yonghui Wu, Slav Petrov, Jeffrey Dean, and Oriol Vinyals. Gemini: A family of highly capable
+multimodal models, 2025. URL https://arxiv.org/abs/2312.11805.
+Harsh Trivedi, Niranjan Balasubramanian, Tushar Khot, and Ashish Sabharwal. MuSiQue: Multihop questions via
+single-hop question composition. Transactions of the Association for Computational Linguistics, 10:539–554, 2022.
+Vladimir Vapnik and Akshay Vashist. A new learning paradigm: Learning using privileged information. Neural
+Networks, 22(5–6):544–557, 2009. doi: 10.1016/j.neunet.2009.06.042. URL https://www.sciencedirect.com/science/
+article/abs/pii/S0893608009001130.
+Dheeraj Vattikonda, Santhoshi Ravichandran, Emiliano Penaloza, Hadi Nekoei, Megh Thakkar, Thibault Le Sellier
+de Chezelles, Nicolas Gontier, Miguel Muñoz-Mármol, Sahar Omidi Shayegan, Stefania Raimondo, Xue Liu,
+Alexandre Drouin, Laurent Charlin, Alexandre Piché, Alexandre Lacoste, and Massimo Caccia. How to train your
+llm web agent: A statistical diagnosis, 2025. URL https://arxiv.org/abs/2507.04103.
+Jian Xie, Kai Zhang, Jiangjie Chen, Tinghui Zhu, Renze Lou, Yuandong Tian, Yanghua Xiao, and Yu Su. Travelplanner:
+A benchmark for real-world planning with language agents, 2024. URL https://arxiv.org/abs/2402.01622.
+An Yang, Anfeng Li, Baosong Yang, Beichen Zhang, Binyuan Hui, Bo Zheng, Bowen Yu, Chang Gao, Chengen Huang,
+Chenxu Lv, Chujie Zheng, Dayiheng Liu, Fan Zhou, Fei Huang, Feng Hu, Hao Ge, Haoran Wei, Huan Lin, Jialong
+Tang, Jian Yang, Jianhong Tu, Jianwei Zhang, Jianxin Yang, Jiaxi Yang, Jing Zhou, Jingren Zhou, Junyang Lin,
+Kai Dang, Keqin Bao, Kexin Yang, Le Yu, Lianghao Deng, Mei Li, Mingfeng Xue, Mingze Li, Pei Zhang, Peng
+
+22
+
+Wang, Qin Zhu, Rui Men, Ruize Gao, Shixuan Liu, Shuang Luo, Tianhao Li, Tianyi Tang, Wenbiao Yin, Xingzhang
+Ren, Xinyu Wang, Xinyu Zhang, Xuancheng Ren, Yang Fan, Yang Su, Yichang Zhang, Yinger Zhang, Yu Wan,
+Yuqiong Liu, Zekun Wang, Zeyu Cui, Zhenru Zhang, Zhipeng Zhou, and Zihan Qiu. Qwen3 technical report, 2025a.
+URL https://arxiv.org/abs/2505.09388.
+Wenkai Yang, Yankai Lin, Jie Zhou, and Ji-Rong Wen. Distilling rule-based knowledge into large language models. In
+Owen Rambow, Leo Wanner, Marianna Apidianaki, Hend Al-Khalifa, Barbara Di Eugenio, and Steven Schockaert
+(eds.), Proceedings of the 31st International Conference on Computational Linguistics, pp. 913–932, Abu Dhabi, UAE,
+January 2025b. Association for Computational Linguistics. URL https://aclanthology.org/2025.coling-main.61/.
+Wenkai Yang, Weijie Liu, Ruobing Xie, Kai Yang, Saiyong Yang, and Yankai Lin. Learning beyond teacher: Generalized
+on-policy distillation with reward extrapolation, 2026. URL https://arxiv.org/abs/2602.12125.
+Zhilin Yang, Peng Qi, Saizheng Zhang, Yoshua Bengio, William Cohen, Ruslan Salakhutdinov, and Christopher D
+Manning. HotpotQA: A dataset for diverse, explainable multi-hop question answering. In Proceedings of the 2018
+Conference on Empirical Methods in Natural Language Processing, pp. 2369–2380, 2018.
+Shunyu Yao, Noah Shinn, Pedram Razavi, and Karthik Narasimhan. τ -bench: A benchmark for tool-agent-user
+interaction in real-world domains, 2024. URL https://arxiv.org/abs/2406.12045.
+Edward Yeo, Yuxuan Tong, Morry Niu, Graham Neubig, and Xiang Yue. Demystifying long chain-of-thought reasoning
+in llms, 2025. URL https://arxiv.org/abs/2502.03373.
+Qiying Yu, Zheng Zhang, Ruofei Zhu, Yufeng Yuan, Xiaochen Zuo, Yu Yue, Tiantian Fan, Gaohong Liu, Lingjun Liu,
+Xin Liu, Haibin Lin, Zhiqi Lin, Bole Ma, Guangming Sheng, Yuxuan Tong, Chi Zhang, Mofan Zhang, Wang Zhang,
+Hang Zhu, Jinhua Zhu, Jiaze Chen, Jiangjie Chen, Chengyi Wang, Hongli Yu, Weinan Dai, Yuxuan Song, Xiangpeng
+Wei, Hao Zhou, Jingjing Liu, Wei-Ying Ma, Ya-Qin Zhang, Lin Yan, Mu Qiao, Yonghui Wu, and Mingxuan Wang.
+Dapo: An open-source llm reinforcement learning system at scale. arXiv preprint arXiv:2503.14476, 2025. URL
+https://arxiv.org/abs/2503.14476.
+Yang Yue, Zhiqi Chen, Rui Lu, Andrew Zhao, Zhaokai Wang, Yang Yue, Shiji Song, and Gao Huang. Does
+reinforcement learning really incentivize reasoning capacity in llms beyond the base model?, 2025. URL https:
+//arxiv.org/abs/2504.13837.
+Siyan Zhao, Zhihui Xie, Mengchen Liu, Jing Huang, Guan Pang, Feiyu Chen, and Aditya Grover. Self-distilled reasoner:
+On-policy self-distillation for large language models, 2026. URL https://arxiv.org/abs/2601.18734.
+Xiangxin Zhou, Zichen Liu, Haonan Wang, Chao Du, Min Lin, Chongxuan Li, Liang Wang, and Tianyu Pang.
+Variational reasoning for language models, 2025. URL https://arxiv.org/abs/2509.22637.
+
+23
+
+A
+
+Connections To Variational EM
+
+In this Appendix, we derive Jπ−Distill using a variational perspective. Specifically, we show how Jπ−Distill can
+be seen as a joint EM algorithm where E and M are done simultaneously.
+Traditional variational-EM aims to fit a parameterized distribution π S onto a target posterior π ∗ . An
+assumption this framework makes is that using π S to approximate π ∗ may be suboptimal, rather, leveraging an
+approximate posterior πθT (o | s, I) conditioned on additional information can make the approximation easier.
+This is true when π T can sample from high-reward modes that π S cannot, therefore making optimization via
+RL impossible for π S . We visualize the procedure in Figure 10
+
+A.1
+
+Variational EM
+
+2 𝐽SFT 𝜙
+𝜋𝜃T
+
+𝜋𝜙𝑆
+
+𝜋∗
+
+(1) 𝐽𝜋T 𝜃
+
+𝑅 𝜏, 𝑥 < 0
+
+𝑅 𝜏, 𝑥 = 0
+
+𝑅 𝜏, 𝑥 > 0
+
+Figure 10 Illustration of the Variational EM procedure for policy optimization. The initial student policy, πθS , lacks
+support over trajectories with positive rewards (R(o, s) > 0), preventing direct improvement. To address this: (1)
+the teacher policy πθT is optimized via JTeacher (θ) to sample successful traces and approximate the optimal policy π ∗ ;
+(2) the student policy is then updated via JSFT (θ) to distill the knowledge from the teacher. While this two-step
+procedure is principled, it is computationally inefficient due to the requirement of maintaining dual parameter sets and
+distinct training phases. In contrast, π-Distill simplifies this pipeline into a single-phase process, providing superior
+performance with reduced complexity.
+
+E-step JTeacher . We first define the target posterior we want to fit, π ∗ , as a reward-tilted posterior relative
+to the reference policy πref . For a given state s, we define:
+π ∗ (o | s) =
+
+πref (o | s) exp(R(o, s))
+Z
+
+(6)
+
+P
+where Z = o′ πref (o′ | s0 ) exp(R(o′ , s)) is the partition function and o = (z, a) consists of internal reasoning
+tokens z and action tokens a.
+The partition function makes this distribution intractable, but it can be approximated using a variational
+posterior πθT (o | s, I) conditioned on privileged information I. We optimize parameters θ by minimizing the
+reverse KL between the variational distribution and the target policy:
+
+
+JTeacher (θ) = −DKL πθT (o | s, I) ∥ π ∗ (· | s)
+
+
+π T (o | s, I)
+= −Eo∼πθT (o|s,I) log θ ∗
+π (o | s)
+s∼P
+
+
+∗
+= Eo∼πθT (o|s,I) log π (o | s) − log πθT (o | s, I)
+s∼P
+
+24
+
+(7)
+
+Substituting the definition of π ∗ into the equation:
+ 
+
+
+πref (o | s) exp(R(o, s))
+T
+JTeacher (θ) = Eo∼πθT (o|s,I) log
+− log πθ (o | s, I)
+Z
+s∼P
+
+
+= Eo∼πθT (o|s,I) R(o, s) + log πref (o | s) − log πθT (o | s, I) − log Z
+s∼P
+
+
+
+= Eo∼πθT (o|s,I) R(o, s) − log πθT (o | s, I) − log πref (o | s) − log Z
+
+s∼P
+
+∝ Eo∼πθT (o|s,I) [R(o, s)] − DKL πθT (o | s, I) ∥ πref (· | s)
+
+(8)
+
+s∼P
+
+Since log Z depends only on the context s, it is constant with respect to θ and can be omitted.
+M-step JSFT . If π ∗ were a tractable distribution, we could directly fit the target policy by minimizing the
+forward KL divergence, DKL (π ∗ ∥ πθS ), corresponding to standard SFT. Since π ∗ is intractable, we instead
+substitute it with our learned approximation πθT , yielding the following objective:
+
+
+JSFT (θ) = Eo∼πθT (o|s,I) log πθS (o|s) .
+(9)
+s∼P
+
+Traditionally, one would either first fit πθT to convergence and use it to fit πθS , or alternate between training
+the teacher and student. Regardless, this process requires two separate models and can be difficult to optimize.
+Our implementation is a modified version of Zhou et al. (2025), where the modifications are specific to our
+multi-turn setting, where no ground truth is provided.
+
+A.2
+
+Failures of Variational EM.
+
+30.0%
+
+Score (%)
+
+24.0%
+18.0%
+12.0%
+6.0%
+0
+
+EM Off-Pol
+
+20
+
+EM RFT
+
+40
+
+60
+
+Gradient Steps
+
+SFT w/ CoT
+
+80
+
+100
+
+SFT w/o CoT
+
+JTeacher( )
+
+Figure 11 Performance of Sequential EM variants on τ -Bench Retail (Qwen3-8B). We compare these methods against
+SFT baselines. While standard EM RFT (light blue) fails to match SFT w/ CoT (yellow), replacing RFT with
+off-policy RL (EM Off-Pol, purple) successfully allows for EM to outperform SFT w CoT. The strongest performance
+comes from JTeacher (θ) (dark blue), demonstrating that parameter sharing between the teacher and student yields the
+most effective transfer. Shaded regions indicate standard error across 3 seeds.
+
+25
+
+Our initial efforts focused on making variational EM work, similar in spirit to Zhou et al. (2025). We first
+document initial ideas that were unsuccessful, then we discuss the best version of EM we could find, being
+a sequential implementation. Finally, we discuss how these experiments ultimately motivated the design
+decisions for π-Distill.
+Initial Experiments First, we find that setting the reference policy πref as a copy of the current student πθS is
+crucial for learning. In contrast, using the fixed base model πbase as a prior significantly hinders performance
+(see App. D.2).
+Building on this insight, we initially explored an offline variational EM method similar to Zhou et al. (2025).
+Here, the goal is learning a CoT sampler as the variational posterior conditioned on expert traces. We do this
+with the following objective:
+"
+#
+X
+S
+JOffline-EM (θ) = Es∼D log
+πθ (a, z | s) exp(R(o, s))
+z
+
+
+
+
+∝ Ea,s∼D,z∼πθT R(o, s) + log πθS (a | z, s) − DKL πθT (z | s) ∥ πθS (z | s)
+
+(10)
+
+Notice here how the states are fixed and given in the offline dataset D. Furthermore, this setup necessitates
+substantial hyperparameter tuning. Beyond the standard penalty β, the algorithm requires balancing the ratio
+of teacher-to-student updates, managing separate optimizer states, and calibrating the dataset size sampled
+from the teacher. Ultimately, we find this approach hard to implement and fails in our multi-turn setting.
+We attribute the success of Zhou et al. (2025) to their access to oracle answers; in our context, we find that
+fitting a variational posterior to suboptimal frontier model trajectories can even degrade performance.
+Our following efforts focused on training the teacher online using Equation (7). We try this with alternating
+loops between student and teacher training, but find this to be ineffective. As we found it hard to avoid the
+student and teacher collapsing onto each other using this setup. Ultimately, we found a sequential version of
+EM worked best, though it still requires specific adjustments to achieve optimal performance.
+Sequential EM. We turn to Sequential EM after ruling out offline and alternating approaches. However, we
+find standard implementations remain unreliable for complex agentic tasks. Here, we analyze the limitations
+of standard EM and how they ultimately motivated π-Distill.
+For this analysis, we use τ -Bench Retail with Qwen3-8B using self-generated hints to train the teacher as
+this configuration performs best (see § 7). We compare sequential EM, where we first train the teacher and
+then perform SFT on successful trajectories (Rejection Fine-tuning or RFT), against SFT with and without
+CoT. We note that here it would be sufficient to outperform SFT without CoT as we assume no access to the
+internal CoT of the frontier model, thus in practice, sequential EM could replace the traditional SFT phase
+before RL.
+We report results in Figure 11. First, we observe that standard Sequential EM outperforms naive SFT but
+lags behind training with CoT. We attribute the performance gap to the lack of negative feedback on failed
+trajectories. It only mimics the teacher. To address this, we replaced the RFT step with clipped off-policy
+RL. We find that this change enables sequential EM to outperform SFT with CoT.
+Most surprisingly, in these experiments, we find that simply optimizing JTeacher (θ) substantially improves the
+student πθS when both teacher and student share parameters. This drastically outperforms all other baselines.
+To summarize, our two main findings are that parameter sharing enables substantial transfer from teacher to
+student and the importance of leveraging negative traces via off-policy RL when training the student. We use
+these two findings to instantiate π-Distill while also simplifying the process from two training steps to a single
+one.
+
+B
+
+On-Policy Self-Distillation JOPSD
+
+Contrary to the prior objectives, OPSD, rather, than trying to approximate π ∗ can be framed as the reverse-Kl
+between π and the target conditioned policy π T ∗ , being defined as:
+26
+
+∗
+
+π (o | s, I) =
+where Z h =
+
+P
+
+πref (o | s, I) exp( R(o,s))
+β
+Zh
+
+(11)
+
+T
+′
+′
+o′ πref (o | s, I) exp(R(o , s)) is the partition function.
+
+One can then approximate this distribution directly via reverse KL, giving the following objective:
+To do this, we minimize the reverse KL between the student policy πθS and the optimal privileged target
+distribution π ∗ :
+
+
+
+πθS (o | s)
+log ∗
+π (o | s, I)
+
+
+
+πref (o | s, I) exp(R(o, s)/β)
+= Eo∼πS (o|s) log πθS (o | s) − log
+θ
+Zh
+s∼P
+
+
+R(o, s)
+S
+h
+= Eo∼πS (o|s) log πθ (o | s) − log πref (o | s, I) −
++ log Z
+θ
+β
+s∼P
+
+
+πθS (o | s)
+R(o, s)
++ log
++ log Z h
+= Eo∼πS (o|s) −
+θ
+β
+π
+(o
+|
+s,
+I)
+ref
+s∼P
+
+1
+= − Eo∼πS (o|s) [R(o, s)] + DKL πθS (· | s) ∥ πref (· | s, I) + log Z h .
+θ
+β
+s∼P
+
+∝ −Eo∼πS (o|s) [R(o, s)] + βDKL πθS (· | s) ∥ πref (· | s, I)
+
+DKL (πθS ∥ π ∗ ) = Eo∼πS (o|s)
+θ
+s∼P
+
+θ
+
+(12)
+(13)
+(14)
+
+s∼P
+
+To align with π-Distill and the according to the results in App. D.2, we set πref = πθT (o | s, I)
+Concurrent On-Policy Distillation Methods. Concurrent work proposes closely related on-policy selfdistillation frameworks. Recent methods train student models on their own trajectories while using privileged
+or conditioned variants of the same model as teachers, enabling on-policy transfer without off-policy distribution
+shift (Zhao et al., 2026; Shenfeld et al., 2026). These approaches are conceptually aligned with our OCPD
+formulation, but target supervised reasoning or continual learning settings, whereas our focus is agentic
+decision-making with training-time privileged information.
+
+27
+
+C
+
+Detailed Algorithms
+
+Here we outline the detailed algorithms for both π-Distill and OPSD.
+Algorithm 1 π-Distill: Privileged Information Distillation for Language Models
+1: Input: Dataset D = {(s, I)} where I is privileged information, Initial Policy πθ , Reference πref , α, β, ϵ,
+
+Learning rate η
+
+2: Initialize: ϕ ← θ {Parameters are shared between Teacher and Student}
+
+3: while not converged do
+4:
+Sample batch B = {(si , Ii )}N
+i=1 ∼ D
+5:
+// Step 1: Teacher Rollout (with Privileged Information)
+6:
+for each (s, I) ∈ B do
+7:
+Sample K trajectories {o1 , . . . , oK } ∼ π T (· | s, I)
+8:
+Compute rewards R(ok , s) = Renv (ok , s) − βDKL [π T (· | s, I)∥πref (· | s, I)]
+
+end for
+// Step 2: Compute Group-Centered Advantages
+for each k ∈ {1, . . . , K} do
+PK
+1
+12:
+R̄ = K
+j=1 R(oj , s)
+13:
+Ak = R(ok , s) − R̄
+14:
+end for
+15:
+// Step 3: Compute Objectives
+16:
+Teacher Objective (GRPO):
+
+PK
+1
+teacher
+17:
+JTeacher = K
+Ak , clip(ρteacher
+, 1 − ϵ, 1 + ϵ)Ak
+k
+k=1 min ρk
+18:
+Student Objective (Off-Policy GRPO):
+S
+(ok |s)
+{Note: Student input is s only}
+19:
+Compute IS weights: ρk = ππT (o
+k |s,I)
+P
+K
+1
+20:
+JStudent = K k=1 min (ρk Ak , clip(ρk , 1 − ϵ, 1 + ϵ)Ak )
+21:
+// Step 4: Joint Update
+22:
+Jπ-Distill (θ) = αJTeacher + (1 − α)JStudent
+23:
+θ ← θ + η∇θ Jπ-Distill (θ)
+24: end while
+9:
+10:
+11:
+
+28
+
+Algorithm 2 On-Policy Self-Distillation
+1: Input: Dataset D = {(s, I)} where I is privileged information, Initial Policy πθ , β, ϵ, Learning rate η
+2: Initialize: θ {Parameters for the Student Policy}
+3: while not converged do
+4:
+Sample batch B = {(si , Ii )}N
+i=1 ∼ D
+5:
+// Step 1: Student Rollout (On-Policy sampling)
+6:
+7:
+8:
+9:
+10:
+11:
+12:
+13:
+14:
+15:
+16:
+17:
+18:
+
+for each (s, I) ∈ B do
+Sample K trajectories {o1 , . . . , oK } ∼ π S (· | s)
+{Reward Computation with Reverse KL}
+
+
+Compute rewards R(ok , s) = Renv (ok , s) − βDKL π S (· | s)∥π T (· | s, I)
+end for
+// Step 2: Compute Group-Centered Advantages
+for each sample i ∈ {1, . . . , N } do
+PK
+1
+R̄i = K
+j=1 R(oi,j , si )
+for each k ∈ {1, . . . , K} do
+Ai,k = R(oi,k , si ) − R̄i
+end for
+end for
+// Step 3: Objective (Off-Policy GRPO)
+π S (o
+
+|s )
+
+i
+Compute IS weights: ρi,k = πSθ (oi,k
+i,k |si )
+old
+P
+K
+1
+20:
+J(θ) = K
+k=1 min (ρi,k Ai,k , clip(ρi,k , 1 − ϵ, 1 + ϵ)Ai,k )
+21:
+// Step 4: Policy Update
+22:
+θ ← θ + η∇θ J(θ)
+23: end while
+
+19:
+
+D
+
+Additional Ablations
+
+D.1
+
+Privilege Information leakage Ablation
+
+We measure privileged-information leakage with a simple keyword detector applied to each assistant message,
+using the keyword list [“privileged information”, “privileged info”, “priv info”, “secret information”, “secret info”,
+“correct tool calls”, “secret”, “privileged”, “hint”, “hints”]. For each occurrence, we assign a penalty of −0.1
+and accumulate it over the trajectory, and we mark a trajectory as leaking if any of these appear. Fig 12
+reports results at β = 0.25 and shows that enabling this leakage penalty does not change task performance
+in any noticeable way, since the learning curves with and without the penalty overlap closely. Fig 13 shows
+the corresponding leakage rate during training, and it rises as training progresses across all modes. The
+pattern with tool-calls showing the highest leakage, tool calls and arguments increasing more moderately, and
+self-generated hints starting lower but still increasing over time.
+
+29
+
+T(
+
+32
+
+= 1) - TauBench - =0.25
+
+30
+28
+
+Score (%)
+
+26
+24
+22
+20
+18
+w/o Leakage Penalty
+w/ Leakage Penalty
+
+16
+0
+
+50
+
+100
+
+150
+
+Gradient Steps
+
+200
+
+250
+
+300
+
+Figure 12 Performance with and without leakage penalty for π T (α = 1). We find that although the penalty does
+reduce the leakage of the privileged information (see Figure 13) it does not affect performance.
+
+Privileged Information Leakage - TauBench
+% Traces Leaking Privileged Info
+
+S - Tool Calls & Arguments
+
+S - Tool Calls
+
+S - Self-Generated Hints
+
+60
+50
+40
+30
+20
+10
+0
+
+50
+
+100
+
+150
+
+200
+
+Gradient Steps
+
+250
+
+300
+
+0
+
+50
+
+100
+
+150
+
+200
+
+250
+
+300
+
+Gradient Steps
+w/o Leakage Penalty
+w/ Leakage Penalty
+
+0
+
+50
+
+100
+
+150
+
+200
+
+Gradient Steps
+
+250
+
+300
+
+Figure 13 Proportion of traces leaking privileged information as training progresses, we see that regardless PI type,
+the leakage increases with more gradient steps, finding using a leakage penalty reduces this proportion, but not
+substantially.
+
+Test-time leakage. As an additional analysis, we analyze whether leakage increases as models are trained
+with privileged data when evaluating π S . Figure 14 outlines this for Qwen3-8B for 300 gradient steps. We
+empirically validate that leakage does not significantly affect or increase when evaluating using π S as the
+presence of leaked words does not meaningfully increase as training continues.
+
+30
+
+Privileged Information Leakage in Evaluations - TauBench
+% Traces Leaking Privileged Info
+
+Tool Calls & Arguments
+
+Tool Calls
+
+Self-Generated Hints
+
+3.0
+2.5
+2.0
+1.5
+1.0
+0.5
+0.0
+0.5
+
+0
+
+50
+
+100
+
+150
+
+200
+
+Gradient Steps
+
+250
+
+300
+
+0
+
+50
+
+100
+
+150
+
+200
+
+250
+
+Gradient Steps
+
+Self-Distill
+
+S
+
+300
+
+0
+
+50
+
+100
+
+150
+
+200
+
+250
+
+Gradient Steps
+
+T+ S
+
+T
+
+300
+
+Figure 14 Proportion of traces leaking privileged information when evaluating π S as training progresses, we see that
+there is no increase in leakage when evaluated as training goes on.
+
+D.2
+
+Reference Model Ablation
+
+We ablate the choice of reference policy used in the KL term by comparing a fixed base reference, πbase ,
+against using the student itself as the reference, πθ (with stop-gradient on the reference branch). Fig.15 shows
+a clear difference in training stability. When πbase is used as the reference, the performance degrades over
+training and can collapse most clearly in the π h setting (α = 1), where the policy is pushed to move far from
+the base while still being penalized for that same deviation. In contrast, using πθ as the reference (orange)
+yields stable learning across α ∈ {0, 0.5, 1}, since the KL regularizer stays aligned with the current student
+distribution. Practically, this choice is also cheaper because using πθ as the reference avoids maintaining a
+separate frozen reference model on the GPU, reducing memory and compute overhead.
+
+Score (%)
+
+32.0%
+
+S(
+
+= 0)
+
+75
+
+100
+
+T+ S (
+
+= 0.5)
+
+T(
+
+= 1)
+
+75
+
+100
+
+24.0%
+16.0%
+8.0%
+0
+
+25
+
+50
+
+125
+
+Gradient Steps
+
+150
+
+175 0
+
+25
+
+50
+
+75
+
+100
+
+125
+
+Gradient Steps
+
+150
+
+175 0
+
+25
+
+50
+
+125
+
+Gradient Steps
+
+150
+
+175
+
+Base
+
+Figure 15 Ablation between using reverse-Kl between the teacher and a prior. We ablate over two possible priors,
+πbase and πθS . We find that using πθS to be highly important in obtaining best performance.
+
+31
+
+D.3
+
+Full β Ablations
+
+Figure 16 outlines the full suite of β ablations for π-Distill variants and self-distillation for Qwen3-4/8B. We
+sweep over β ∈ {0.1, 0.25, 0.5}.
+Self-Generated Hints
+S ( = 1)
+
+Self-Generated Hints
+SFT + RL
+
+Self-Generated Hints
+S + T ( = 0.5)
+
+Self-Generated Hints
+T ( = 0)
+
+Self-Generated Hints
+On-Policy Distillation
+
+Score (%)
+
+35
+30
+25
+20
+15
+10
+5
+00
+
+200
+
+300
+
+400
+
+Gradient Step
+
+500
+
+600 0
+
+100
+
+200
+
+300
+
+400
+
+Gradient Step
+
+500
+
+600 0
+
+100
+
+Tool Calls
+S ( = 1)
+
+Tool Calls
+SFT + RL
+
+200
+
+300
+
+400
+
+Gradient Step
+
+500
+
+600 0
+
+25
+
+50
+
+75
+
+100 125 150 175 200 225 0
+
+Gradient Step
+
+Tool Calls
+= 0.5)
+
+50
+
+Tool Calls
+T ( = 0)
+
+S+ T (
+
+100
+
+150
+
+200
+
+Gradient Step
+
+250
+
+300
+
+250
+
+300
+
+250
+
+300
+
+250
+
+300
+
+250
+
+300
+
+250
+
+300
+
+Tool Calls
+On-Policy Distillation
+
+Score (%)
+
+35
+30
+25
+20
+15
+10
+5
+00
+
+100
+
+200
+
+300
+
+400
+
+Gradient Step
+
+500
+
+600 0
+
+100
+
+200
+
+300
+
+400
+
+Gradient Step
+
+500
+
+600 0
+
+100
+
+Tool Calls & Arguments
+S ( = 1)
+
+Tool Calls & Arguments
+SFT + RL
+
+200
+
+300
+
+400
+
+Gradient Step
+
+500
+
+600 0
+
+25
+
+Tool Calls & Arguments
+S + T ( = 0.5)
+
+50
+
+75
+
+100 125 150 175 200 225 0
+
+Gradient Step
+
+50
+
+Tool Calls & Arguments
+T ( = 0)
+
+100
+
+150
+
+200
+
+Gradient Step
+
+Tool Calls & Arguments
+On-Policy Distillation
+
+Score (%)
+
+35
+30
+25
+20
+15
+10
+5
+00
+
+100
+
+100
+
+200
+
+300
+
+400
+
+Gradient Step
+
+500
+
+600 0
+
+100
+
+200
+
+300
+
+400
+
+Gradient Step
+
+500
+
+600 0
+
+100
+
+200
+
+=0
+
+SFT + RL
+
+300
+
+400
+
+Gradient Step
+
+500
+
+= 0.1
+
+600 0
+
+25
+
+50
+
+75
+
+100 125 150 175 200 225 0
+
+Gradient Step
+
+= 0.25
+
+50
+
+100
+
+150
+
+200
+
+Gradient Step
+
+= 0.5
+
+(a) Qwen3-8B
+Self-Generated Hints
+S ( = 1)
+
+Self-Generated Hints
+SFT + RL
+
+25
+
+Self-Generated Hints
+S + T ( = 0.5)
+
+Self-Generated Hints
+T ( = 0)
+
+Self-Generated Hints
+On-Policy Distillation
+
+Score (%)
+
+20
+15
+10
+5
+00
+
+50
+
+100
+
+150
+
+200
+
+Gradient Step
+
+250
+
+300 0
+
+100
+
+200
+
+400
+
+500
+
+600 0
+
+100
+
+Tool Calls
+S ( = 1)
+
+Tool Calls
+SFT + RL
+
+25
+
+300
+
+Gradient Step
+
+200
+
+300
+
+400
+
+Gradient Step
+
+500
+
+600 0
+
+20
+
+40
+
+Tool Calls
+= 0.5)
+
+60
+
+80
+
+100
+
+Gradient Step
+
+120
+
+140
+
+0
+
+50
+
+Tool Calls
+T ( = 0)
+
+S+ T (
+
+100
+
+150
+
+200
+
+Gradient Step
+
+Tool Calls
+On-Policy Distillation
+
+Score (%)
+
+20
+15
+10
+5
+00
+
+50
+
+100
+
+150
+
+200
+
+Gradient Step
+
+250
+
+300 0
+
+100
+
+300
+
+400
+
+Gradient Step
+
+500
+
+600 0
+
+100
+
+Tool Calls & Arguments
+S ( = 1)
+
+Tool Calls & Arguments
+SFT + RL
+
+25
+
+200
+
+200
+
+300
+
+400
+
+Gradient Step
+
+500
+
+600 0
+
+20
+
+Tool Calls & Arguments
+S + T ( = 0.5)
+
+40
+
+60
+
+80
+
+100
+
+Gradient Step
+
+120
+
+140
+
+0
+
+50
+
+Tool Calls & Arguments
+T ( = 0)
+
+100
+
+150
+
+200
+
+Gradient Step
+
+Tool Calls & Arguments
+On-Policy Distillation
+
+Score (%)
+
+20
+15
+10
+5
+00
+
+50
+
+100
+
+150
+
+200
+
+Gradient Step
+
+250
+
+300 0
+
+100
+
+200
+
+300
+
+400
+
+Gradient Step
+
+500
+
+SFT + RL
+
+600 0
+
+100
+
+=0
+
+200
+
+300
+
+400
+
+Gradient Step
+
+500
+
+= 0.1
+
+600 0
+
+= 0.25
+
+20
+
+40
+
+60
+
+80
+
+100
+
+Gradient Step
+
+120
+
+140
+
+0
+
+50
+
+100
+
+150
+
+200
+
+Gradient Step
+
+= 0.5
+
+(b)Qwen3-4B
+Figure 16 Full sweep for β over variants of π-Distill. All experiments are given a 600 gradient step budget, where here
+we cut off experiment types early if they crash or do not continue learning. Consistent performance gains are seen for
+β > 0 across both 8B and 4B scales. We find that β > 0 is important in 14/18 cases. Specifically, we find it most
+important when training π T and less important with student-only training π S .
+
+32
+
+E
+
+Implementation setup - Further details
+
+E.1
+
+KL Estimator
+
+For all losses requiring a Kl estimation, we use the Rae-Blackwellized estimator(Amini et al., 2025). For
+π-Distill, we use a sequence-level penalty aggregated into the reward term following Shah et al. (2026). In
+this setting, we allow the KL penalty to be absorbed into the advantage computation.
+For OPSD, we use the same estimator as in (Amini et al., 2025) and directly back-propagate through the
+estimation.
+
+E.2
+
+Length Penalty
+
+In our setting, we found that policies can become overly verbose. To mitigate this, we add a cosine-shaped
+length penalty inspired by the cosine length-scaling reward Yeo et al. (2025). We apply this penalty only to
+successful traces (i.e., when the base reward r > 0). For each assistant turn i with token length li , we use
+a no-penalty threshold lth = 2000 and a soft allowance lmax = 5000. If li ≤ lth , the turn penalty is pi = 0
+otherwise we assign a negative penalty using a linear–cosine schedule that increases in magnitude with length,
+approaching −λ near lmax with λ = 0.1, and becoming harsher beyond lmax (up to an endpoint of −2λ). We
+then average the per-turn penalties across the N assistant turns:
+N
+
+p̄ =
+
+1 X
+pi .
+N i=1
+
+We cap the total penalty as ptotal = max(p̄, −0.3) and add that to the base reward r′ = r + ptotal .
+
+E.3
+
+Hyper-Parameters
+
+Here table 2 we outline the swept hyperparameters, as well as their final values.
+Category
+
+Parameter
+
+R1-Distill-Llama-8B
+
+General
+
+Seeds
+Rollout temperature
+Trace length filter
+Advantage processing
+
+3
+3
+3
+0.75
+0.75
+0.75
+Discard if tokens > 25k (τ -Bench/TP), > 35k (RL/OPSD)
+pop zero-advantage (always)
+
+Training Budgets
+
+τ -Bench total gradient steps
+TP total gradient steps
+
+Sampling
+
+Gradient steps per sampling
+Repeats per group
+Training tasks sampled
+
+Optimization
+
+Learning-rate sweep
+Final LR
+β
+Clipping/epsilon
+
+Alpha Annealing
+
+α = 0.5 schedule
+
+600
+400
+
+QWEN3-4B
+
+600
+400
+
+QWEN3-8B
+
+600
+400
+
+τ -Bench = 3, TP = 2
+τ -Bench = 5, TP = 4
+τ -Bench = 64, TP = 45, SFT+RL (τ -Bench) = 128
+{1e-6, 5e-6, 1e-5}
+τ -Bench: 5e-6 for all, TP: π-distill = 1e-5, RL/OPSD = 5e-6
+TP/OPSD = 0.5, π-distill = 0.25 (unless swept)
+Lower = 0.8, Upper = 1.2
+Linearly anneal α : 0 → 0.5 over 15 epochs
+
+Table 2 Hyperparameters used for each fine-tuned model. All models share identical hyperparameter settings. Travel
+Planner is abbreviated to TP.
+
+F
+
+Plot and Table Discrepancies
+
+In this Fig 17, the 31.11% number is computed from the three seed peaks in the right panel. Each seed reaches
+its best score at a different gradient step, roughly one around 70 steps, another around 95, and another around
+150. We take those three peak values and average them, which gives 31.11%, and that is what is reported in
+the table. The left panel instead shows the mean score at each gradient step, averaging the seeds at the same
+33
+
+step, so its peak corresponds to the best point of the averaged curve rather than the average of the three best
+points. This difference in aggregation means the table can be higher than the peak of the averaged curve
+shown in the left plot.
+h(
+
+= 1) - TauBench - -Tool Calls - = 0.25
+Peak Average over 3 seeds = 31.11%
+
+Aggregated (mean ± SE)
+
+32
+
+Individual Seeds
+
+30
+28
+
+Score (%)
+
+26
+24
+22
+20
+18
+
+Seed 1
+Seed 2
+Seed 3
+
+16
+0
+
+50
+
+100
+
+150
+
+Gradient Steps
+
+200
+
+250
+
+300 0
+
+50
+
+100
+
+150
+
+Gradient Steps
+
+200
+
+250
+
+300
+
+Figure 17 Comparison aggregating training runs versus the individual training runs. The left figure displays the mean
+score across seeds at each gradient step, while the right panel highlights the individual trajectories where peaks occur
+at different intervals. The reported table value (31.11%) represents the average of these individual seed peaks.
+
+G
+
+Reward Hacking in Travel Planner
+
+Our early experiments show that the model is able to consistently reward-hack the original rubric-based
+rewards proposed by Xie et al. (2024). Specifically, Figure 18 shows the learning curves under the original
+reward structure. The policy appears to steadily improve; however, upon inspection, we observe that all traces
+collapse to the response structure shown in Section G. We attribute this behavior to the model learning that
+invoking the Planner[.] tool ends the conversation and, with certain arguments, reliably yields a high reward.
+We address this issue by removing the requirement that all “easy” constraints must be satisfied before any
+“hard” constraint is checked. Instead, we evaluate each easy constraint individually and, only if it is satisfied,
+we then check its corresponding hard constraint.
+τ -Bench Travel Planner Model Trajectory
+Role: Assistant
+<think>
+Okay, let's tackle this travel planning query. The user wants a 7-day plan from Punta Gorda to three Wisconsin cities
+between March 16-22, 2022, with a $5,700 budget.
+First, I need to use the Planner tool to structure the itinerary. Check FlightSearch for available flights from Punta
+Gorda to Wisconsin cities. Maybe Milwaukee, Madison, and Green Bay? Use AccommodationSearch for each city.
+RestaurantSearch and AttractionSearch to suggest activities. Check GoogleDistanceMatrix for travel times between
+cities. Make sure the total costs are under budget. Use NotebookWrite to document the plan. Ensure the Planner
+incorporates all elements and stays within the budget. Avoid mentioning hints, just present the plan logically.
+</think>
+<action>Planner[Query: Craft a 7-day Wisconsin itinerary from Punta Gorda, including 3 cities, flights,
+accommodations, attractions, and budget adherence using available tools. Prioritize March 16-22, 2022.]</action>
+
+34
+
+40.0%
+
+Train
+Test
+
+Score (%)
+
+35.0%
+30.0%
+25.0%
+20.0%
+15.0%
+0
+
+100
+
+200
+
+300
+
+Gradient Steps
+
+400
+
+500
+
+Figure 18 Training and testing curves for Travel Planner, using the original reward structure proposed in Xie et al.
+(2024) with Qwen3-4B. We find that while the model learns, the sequences generally converge on reward hacking.
+Where the entire score is dominated by the ”easy constraint score” as the model has learnt to satisfy some basic
+constraints, leading to the policy outputting the same response for all queries.
+
+H
+
+Prompts
+
+H.1
+
+System Prompts
+
+For both τ -Bench and Travel Planner, we slightly modify the prompt to indicate that the model should output
+its action in corresponding <action></action> tags. Below, we display the full system prompts used for
+τ -Bench and Travel Planner.
+τ -Bench Retail System Prompt
+
+Retail agent policy
+
+As a retail agent, you can help users cancel or modify pending orders, return or exchange delivered orders,
+modify their default user address, or provide information about their own profile, orders, and related
+products.
+• At the beginning of the conversation, you have to authenticate the user identity by locating their
+user id via email, or via name + zip code. This has to be done even when the user already provides
+the user id.
+• Once the user has been authenticated, you can provide the user with information about the order,
+product, profile information, e.g. help the user look up the order id.
+• You can only help one user per conversation (but you can handle multiple requests from the same
+user), and must deny any requests for tasks related to any other user.
+• Before taking consequential actions that update the database (cancel, modify, return, exchange),
+you have to list the action detail and obtain explicit user confirmation (yes) to proceed.
+• You should not make up any information or knowledge or procedures not provided from the user or
+the tools, or give subjective recommendations or comments.
+• You should at most make one tool call at a time, and if you take a tool call, you should not respond
+to the user at the same time. If you respond to the user, you should not make a tool call.
+
+Domain basic
+
+• All times in the database are EST and 24 hour based. For example “02:30:00” means 2:30 AM EST.
+• Each user has a profile of its email, default address, user id, and payment methods. Each payment
+method is either a gift card, a paypal account, or a credit card.
+
+35
+
+• Our retail store has 50 types of products. For each type of product, there are variant items of
+different options. For example, for a ‘t shirt’ product, there could be an item with option ‘color
+blue size M’, and another item with option ‘color red size L’.
+• Each product has an unique product id, and each item has an unique item id. They have no relations
+and should not be confused.
+• Each order can be in status ‘pending’, ‘processed’, ‘delivered’, or ‘cancelled’. Generally, you can
+only take action on pending or delivered orders.
+• Exchange or modify order tools can only be called once. Be sure that all items to be changed are
+collected into a list before making the tool call!!!
+
+Cancel pending order
+
+• An order can only be cancelled if its status is ‘pending’, and you should check its status before
+taking the action.
+• The user needs to confirm the order id and the reason (either ‘no longer needed’ or ‘ordered by
+mistake’) for cancellation.
+• After user confirmation, the order status will be changed to ‘cancelled’, and the total will be refunded
+via the original payment method immediately if it is gift card, otherwise in 5 to 7 business days.
+
+Modify pending order
+
+• An order can only be modified if its status is ‘pending’, and you should check its status before
+taking the action.
+• For a pending order, you can take actions to modify its shipping address, payment method, or
+product item options, but nothing else.
+Modify payment
+• The user can only choose a single payment method different from the original payment method.
+• If the user wants the modify the payment method to gift card, it must have enough balance to cover
+the total amount.
+• After user confirmation, the order status will be kept ‘pending’. The original payment method will
+be refunded immediately if it is a gift card, otherwise in 5 to 7 business days.
+Modify items
+• This action can only be called once, and will change the order status to ‘pending (items modifed)’,
+and the agent will not be able to modify or cancel the order anymore. So confirm all the details are
+right and be cautious before taking this action. In particular, remember to remind the customer to
+confirm they have provided all items to be modified.
+• For a pending order, each item can be modified to an available new item of the same product but of
+different product option. There cannot be any change of product types, e.g. modify shirt to shoe.
+• The user must provide a payment method to pay or receive refund of the price difference. If the
+user provides a gift card, it must have enough balance to cover the price difference.
+
+Return delivered order
+
+• An order can only be returned if its status is ‘delivered’, and you should check its status before
+taking the action.
+• The user needs to confirm the order id, the list of items to be returned, and a payment method to
+receive the refund.
+• The refund must either go to the original payment method, or an existing gift card.
+• After user confirmation, the order status will be changed to ‘return requested’, and the user will
+receive an email regarding how to return items.
+
+Exchange delivered order
+
+• An order can only be exchanged if its status is ‘delivered’, and you should check its status before
+taking the action. In particular, remember to remind the customer to confirm they have provided
+all items to be exchanged.
+• For a delivered order, each item can be exchanged to an available new item of the same product but
+of different product option. There cannot be any change of product types, e.g. modify shirt to shoe.
+• The user must provide a payment method to pay or receive refund of the price difference. If the
+user provides a gift card, it must have enough balance to cover the price difference.
+• After user confirmation, the order status will be changed to ‘exchange requested’, and the user will
+receive an email regarding how to return items. There is no need to place a new order.
+
+36
+
+Available tools:
+{tools_info}
+
+Instruction
+You need to act as an agent that use the above tools to help the user according to the above policy. At
+each step, your generation should have exactly the following format:
+<think>
+...Few lines of reasoning
+</think>
+<action>
+{"name": <The name of the action>, "arguments": <The arguments to the action in json format>}
+</action>
+
+The Action will be parsed, so it must be valid JSON and within the <action> and </action> tags. You
+should not use made-up or placeholder arguments.
+For example, if the user says “I want to know the current weather of San Francisco”, and there is such a
+tool available:
+{
+
+}
+
+"type": "function",
+"function": {
+"name": "get_current_weather",
+"description": "Get the current weather",
+"parameters": {
+"type": "object",
+"properties": {
+"location": {
+"type": "string",
+"description": "The city and state, e.g. San Francisco, CA",
+},
+"format": {
+"type": "string",
+"enum": ["celsius", "fahrenheit"],
+"description": "The temperature unit to use. Infer from location.",
+},
+},
+"required": ["location", "format"],
+},
+}
+
+Example response
+Step 1:
+<think>
+... Few lines of reasoning
+</think>
+<action>
+{"name": "get_current_weather", "arguments": {"location": "San Francisco, CA", "format": "fahrenheit"}}
+</action>
+
+37
+
+The tool and the user have the same id tags so if the user returns “70F”, your response can be:
+Step 2:
+<think>
+... Few lines of reasoning
+</think>
+<action>
+{"name": RESPOND_ACTION_NAME, "arguments": {"RESPOND_ACTION_FIELD_NAME": "The
+current weather of San Francisco is 70F."}}
+</action>
+
+Requirement
+Try to be helpful and always follow the policy. Always try to validate your steps in your thinking and
+checkover your work, try to predict what will happen given your actions. Always make sure you generate
+valid JSON only.
+
+Important Notes
+
+• Be very brief in the reasoning, do not repeat the entire context or the tools, just focus on what you
+need to do next.
+• Always respond to the user using the tool {RESPOND_ACTION_NAME} to ensure the user
+sees your response.
+• Only use a single set of thinking tags, the user cannot see your thoughts.
+• Always wrap your tool calls <action> and </action> tags or else the system will not be able to
+parse your actions.
+• Always start your outputs by thinking using <think> ... </think>.
+Ok with this said, let us reason this out step by step always starting with <think> and ending with
+</think>.
+Travel Planning System Prompt
+You are a travel planning assistant. You have access to the following tools:
+• FlightSearch[Departure City, Destination City, Date]
+• AccommodationSearch[City]
+• RestaurantSearch[City]
+• AttractionSearch[City]
+• CitySearch[State]
+• GoogleDistanceMatrix[Origin, Destination, Mode]
+• NotebookWrite[Description]
+• Planner[Query]
+Respond in this format:
+<think>Your reasoning here</think>
+<action>ToolName[arguments]</action>
+
+Query:
+{query}
+
+38
+
+H.2
+
+Full trajectories
+
+Example Trajectory
+User Task:
+I’d like to start a return for #W6619432 and process it through PayPal account paypal_3738584 for the Dumbbell Set and Yoga Mat.
+Agent Trajectory:
+1. Turn 1:
+<action>
+{"name": "respond", "arguments": {"content": "I'd be happy to help you with your return for order #
+W6619432. First, I need to verify your identity to ensure the security of your account. Could you
+please provide your email address? Alternatively, you can provide your first name, last name, and
+zip code."}}
+</action>
+
+2. Turn 2:
+<action>
+{"name": "find_user_id_by_name_zip", "arguments": {"first_name": "Sophia", "last_name": "
+Nguyen", "zip": "20171"}}
+</action>
+
+3. Turn 3:
+<action>
+{"name": "get_order_details", "arguments": {"order_id": "#W6619432"}}
+</action>
+
+4. Turn 4:
+<action>
+{"name": "respond", "arguments": {"content": "Thank you for providing your information. I've
+verified your order #W6619432, which is delivered and includes:\n- Yoga Mat (item ID:
+6195938807)\n- Dumbbell Set (item ID: 3735133539)\n\nYou're requesting to return both items
+and process the refund through your PayPal account (paypal_3738584). The total refund amount
+will be $612.35.\n\nPlease confirm that you want to proceed with returning both items and
+receiving the refund to your PayPal account. Type 'yes' to confirm or 'no' to cancel."}}
+</action>
+
+5. Turn 5:
+<action>
+{"name": "return_delivered_order_items", "arguments": {"order_id": "#W6619432", "item_ids":
+["6195938807", "3735133539"], "payment_method_id": "paypal_3738584"}}
+</action>
+
+6. Turn 6:
+<action>
+{"name": "respond", "arguments": {"content": "Your return request for order #W6619432 has been
+processed successfully. The order status is now 'return requested'. You will receive an email with
+detailed instructions on how and where to return the Yoga Mat and Dumbbell Set. The refund of
+$612.35 will be processed to your PayPal account (paypal_3738584). Please check your email for
+the return instructions. Is there anything else I can help you with today?"}}
+</action>
+
+39
+
+7. Turn 7:
+<action>
+{"name": "respond", "arguments": {"content": "You're very welcome! I'm glad I could help with your
+return. Your refund will be processed to your PayPal account. Have a great day!"}}
+</action>
+
+H.3
+
+Self-generated hints
+
+Self-Generated Hint Example
+Task:
+Your name is Amelia Wilson and your email is amelia.wilson1598@example.com. You are confident,
+cautious, dependent, shy, pessimistic. Cancel order #W3062096 because ordered by mistake.
+Self-Generated Hint:
+The agent authenticated the user via email, retrieved the order details, confirmed the order ID and
+cancellation reason, and successfully cancelled the order using the cancel_pending_order function. The
+refund process was initiated, and the user was informed of the next steps.
+Conversation:
+[user] Hi, I need to cancel an order I placed by mistake.
+[assistant] Action: {"name": "respond", "arguments": {"content":
+"I can help you cancel your order. First, I need to authenticate
+your identity. Could you please provide your email address?
+Alternatively, you can provide your first name, last name, and
+zip code."}}
+[user] Sure, my email is amelia.wilson1598@example.com.
+[assistant] Action: {"name": "find_user_id_by_email",
+"arguments": {"email": "amelia.wilson1598@example.com"}}
+[API output] amelia_wilson_4614
+[assistant] Action: {"name": "respond", "arguments": {"content":
+"Thank you for providing your email. Could you please share the
+order ID you'd like to cancel? This will help me verify the order
+details and proceed with the cancellation."}}
+[user] Yes, the order ID is W3062096.
+[assistant] Action: {"name": "get_order_details",
+"arguments": {"order_id": "#W3062096"}}
+[API output] {"order_id": "#W3062096",
+"user_id": "amelia_wilson_4614", "address": {"address1":
+"388 Elm Avenue", "address2": "Suite 384", "city": "Dallas",
+"country": "USA", "state": "TX", "zip": "75215"}, "items":
+[{"name": "T-Shirt", "product_id": "9523456873",
+"item_id": "3234800602", "price": 46.66, "options":
+{"color": "red", "size": "L", "material": "cotton",
+"style": "v-neck"}}, {"name": "Smart Watch",
+"product_id": "6945232052", "item_id": "8739626972",
+"price": 370.87, "options": {"color": "silver",
+
+40
+
+"band material": "silicone", "display": "AMOLED"}},
+{"name": "Jigsaw Puzzle", "product_id": "1808611083",
+"item_id": "9370300555", "price": 45.9, "options":
+{"pieces": "1000", "theme": "art", "difficulty level":
+"expert"}}], "fulfillments": [], "status": "pending",
+"payment_history": [{"transaction_type": "payment",
+"amount": 463.43, "payment_method_id": "paypal_4101143"}]}
+[assistant] Action: {"name": "respond", "arguments": {"content":
+"I can cancel your order #W3062096, which includes a T-Shirt,
+Smart Watch, and Jigsaw Puzzle, totaling $463.43. The reason for
+cancellation is 'ordered by mistake'. The refund will be processed
+back to your PayPal account in 5-7 business days. Please confirm
+with 'yes' if you'd like to proceed with the cancellation."}}
+[user] Yes, please go ahead and cancel it.
+[assistant] Action: {"name": "cancel_pending_order",
+"arguments": {"order_id": "#W3062096",
+"reason": "ordered by mistake"}}
+[API output] {"order_id": "#W3062096",
+"user_id": "amelia_wilson_4614", "address": {"address1":
+"388 Elm Avenue", "address2": "Suite 384", "city": "Dallas",
+"country": "USA", "state": "TX", "zip": "75215"}, "items":
+[{"name": "T-Shirt", "product_id": "9523456873",
+"item_id": "3234800602", "price": 46.66, "options":
+{"color": "red", "size": "L", "material": "cotton",
+"style": "v-neck"}}, {"name": "Smart Watch",
+"product_id": "6945232052", "item_id": "8739626972",
+"price": 370.87, "options": {"color": "silver",
+"band material": "silicone", "display": "AMOLED"}},
+{"name": "Jigsaw Puzzle", "product_id": "1808611083",
+"item_id": "9370300555", "price": 45.9, "options":
+{"pieces": "1000", "theme": "art", "difficulty level":
+"expert"}}], "fulfillments": [], "status": "cancelled",
+"payment_history": [{"transaction_type": "payment",
+"amount": 463.43, "payment_method_id": "paypal_4101143"},
+{"transaction_type": "refund", "amount": 463.43,
+"payment_method_id": "paypal_4101143"}],
+"cancel_reason": "ordered by mistake"}
+[assistant] Action: {"name": "respond", "arguments": {"content":
+"Your order #W3062096 has been successfully cancelled. The refund
+of $463.43 will be processed back to your PayPal account within
+5-7 business days. If you have any further questions or need
+assistance with anything else, feel free to ask!"}}
+[user] Thank you, that's all I needed. ###STOP###
+
+Hint Generation Prompt:
+You are creating a concise natural language hint that will help an agent solve the task. Write a helpful
+hint describing the key actions and strategy the agent used. If the agent did not fully complete the task,
+focus on what they did achieve. IMPORTANT: Output ONLY plain text - no JSON, no code blocks, no
+markdown formatting. Keep the hint to 2-3 sentences maximum.
+The prompt used
+
+41
+
+H.4
+
+Privileged Information Prompts
+
+We use the same prompts When using PI in both models. Specifically, we try to ask the model not to reveal
+it has access to PI by encasing it in <Secret information></Secret information> tags. We found this to
+be unsuccessful as shown in the experiments in App D.
+Privileged Instructions
+<Secret information>
+This section contains privileged hints derived from prior successful trajectories. Use them to stay on
+track, but never mention that hints were provided.
+Hint Summary:
+{hint_lines}
+
+Your Task:
+1. Follow the hints to accomplish the task still reasoning with <think>...</think> before actions.
+2. Never acknowledge having access to secret hints.
+Always start responses with a <think> block.
+</Secret information>
+Privileged Tool Instructions
+<Secret information>
+This section is highly important for you to pay attention to. You have been given access to secret
+information that is not available to the user and should not be mentioned.
+Here is a successful set of tools, given the context and tools that have been called so far use this information
+to accomplish the task.
+{tool_calls_section}
+
+Your Task:
+1. You will need to use the provided tools in order to accomplish the task.
+2. Reasoning: Please reason about your steps. If you think you need to use a tool, provide reasoning
+justifications and clear logic for using it before invoking it using <think>reasoning...</think>.
+3. Strict Constraint: Do NOT mention that you have been given access to the secret information.
+You will be penalized for violating this rule.
+Reasoning Format
+Your reasoning traces will be used to train future agents that do not have access to privileged information.
+Please make sure your reasoning is clear and concise.
+Always start your outputs by thinking using <think> . . . </think>
+</Secret information>
+
+42
+
+
