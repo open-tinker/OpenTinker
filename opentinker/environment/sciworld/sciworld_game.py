@@ -119,12 +119,10 @@ class SciWorldGame(AbstractGame):
             self.max_steps,
             self.split,
         )
-        self._env = ScienceWorldEnv(
-            "",
-            jar_path=self.jar_path,
-            envStepLimit=self.max_steps,
-            threadNum=self._thread_num,
-        )
+        kwargs = {"envStepLimit": self.max_steps}
+        if self.jar_path:
+            kwargs["serverPath"] = self.jar_path
+        self._env = ScienceWorldEnv("", **kwargs)
 
     def close(self) -> None:
         if self._env is not None:
