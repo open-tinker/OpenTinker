@@ -9,8 +9,11 @@
 export ROLLOUT_TRACE_DIR="${ROLLOUT_TRACE_DIR:-./traces}"
 mkdir -p "$ROLLOUT_TRACE_DIR"
 # export NVCC_EXECUTABLE=$CUDA_HOME/bin/nvcc
-export TORCH_CUDA_ARCH_LIST="9.0"
+export TORCH_CUDA_ARCH_LIST="8.6"
 export FLASHINFER_HOMOGENEOUS_MS=1
+
+# Workaround for vLLM cumem allocator CUDA errors during wake_up/sleep cycles
+export VLLM_DISABLE_SLEEP_MODE=1
 
 # Default configuration
 AVAILABLE_GPUS="[0,1,2,3]"

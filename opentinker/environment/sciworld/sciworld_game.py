@@ -295,14 +295,16 @@ class SciWorldGame(AbstractGame):
             )
 
         variations = self._resolve_variations_for_task(selected_task)
-        selected_variation = (
-            int(variation) if variation is not None else random.choice(variations)
-        )
-        if selected_variation not in variations:
-            raise ValueError(
-                f"Variation {selected_variation} is not valid for task {selected_task!r} "
-                f"under split={self.split!r}. Available={variations[:20]}"
-            )
+        if variation is not None and int(variation) in variations:
+            selected_variation = int(variation)
+        else:
+            if variation is not None:
+                logger.warning(
+                    f"Variation {variation} is not valid for task {selected_task!r} "
+                    f"under split={self.split!r}. Available={variations[:20]}. "
+                    f"Falling back to random valid variation."
+                )
+            selected_variation = random.choice(variations)
 
         return selected_task, selected_variation
 
