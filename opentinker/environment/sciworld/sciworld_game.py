@@ -361,6 +361,14 @@ class SciWorldGame(AbstractGame):
         self._current_info = info
         self._admissible_actions = self._get_admissible_actions()
 
+        # Enforce step limit
+        if self._step_count >= self.max_steps and not done:
+            done = True
+            observation = (
+                f"TIMEOUT: Maximum steps ({self.max_steps}) reached.\n\n{observation}"
+            )
+            self._current_obs = str(observation)
+
         score = self._extract_score(info, default=self._score)
         success = self._extract_success(
             done=done, reward=reward, info=info, score=score
@@ -369,15 +377,10 @@ class SciWorldGame(AbstractGame):
             info=info, observation=self._current_obs
         )
 
-        normalized_reward = self._normalize_reward(reward)
         if done and success:
-            final_reward = max(normalized_reward, self.REWARD_SUCCESS)
+            final_reward = self.REWARD_SUCCESS
         elif done:
-            final_reward = (
-                normalized_reward if normalized_reward != 0.0 else self.REWARD_FAILURE
-            )
-        elif normalized_reward != 0.0:
-            final_reward = normalized_reward
+            final_reward = self.REWARD_FAILURE
         elif valid_action is False:
             final_reward = self.REWARD_INVALID_ACTION
         else:

@@ -1,13 +1,18 @@
 # LLM Game Agent (ScienceWorld Multi-Turn)
 
-This example demonstrates training a language model to interact with the
-ScienceWorld text environment through OpenTinker's generic game stack.
+**Author:** Haofeiy
+
+This example demonstrates training a language model to complete science tasks in the ScienceWorld text-based environment.
 
 ## Overview
 
-ScienceWorld is a text-based benchmark of grounded science tasks. Each episode
-loads a task name plus a variation index, and the agent solves it through text
-actions such as inspecting rooms, manipulating objects, and combining materials.
+ScienceWorld is a text-based benchmark of grounded science tasks. Tasks include:
+
+- Boiling / freezing / melting substances
+- Identifying and classifying living things
+- Using instruments (thermometer, microscope, etc.)
+- Combining materials to produce reactions
+- Navigating rooms to find and manipulate objects
 
 OpenTinker support follows the same pattern as ALFWorld:
 
@@ -19,7 +24,7 @@ OpenTinker support follows the same pattern as ALFWorld:
 
 1. Complete the [Installation](../README.md#-installation) steps
 2. Install ScienceWorld: `pip install scienceworld`
-3. Ensure Java is available, since ScienceWorld launches a JVM-backed server
+3. Ensure **Java** is available (`java -version`), since ScienceWorld launches a JVM-backed server
 4. Get your IP address if client and scheduler run on different machines: `hostname -I`
 
 ## Step 1: Start the Scheduler
@@ -83,6 +88,28 @@ python opentinker/client/sciworld_rl.py \
   generation matches the remote environment.
 - If you already run ScienceWorld-backed processes on the same machine, move
   `--thread-base` and `interaction.config.local_thread_base` to disjoint ranges.
+
+## Reward Structure
+
+| Event            | Reward |
+| ---------------- | ------ |
+| Task Success     | +10.0  |
+| Task Failure     | -1.0   |
+| Per Step Penalty | -0.01  |
+| Invalid Action   | -0.1   |
+
+## Example Actions
+
+The agent interacts with the environment using text commands:
+
+- `look around` - Observe the current room
+- `open door to kitchen` - Navigate between rooms
+- `pick up thermometer` - Pick up an object
+- `use thermometer on water` - Use an instrument
+- `pour water into beaker` - Combine or transfer materials
+- `focus on substance in microscope` - Examine with instruments
+- `inventory` - Check held items
+- `wait` - Wait one step (e.g. for a reaction)
 
 ## Configuration Reference
 

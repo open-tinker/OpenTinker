@@ -13,7 +13,7 @@ os.environ["CUDA_VISIBLE_DEVICES"] = ""
 def main():
     parser = argparse.ArgumentParser(description="ScienceWorld Game Server")
     parser.add_argument("--host", default="0.0.0.0", help="Server host")
-    parser.add_argument("--port", type=int, default=8082, help="Server port")
+    parser.add_argument("--port", type=int, default=8092, help="Server port")
     parser.add_argument(
         "--shards",
         type=int,

@@ -1,5 +1,15 @@
 #!/usr/bin/env python3
-"""ScienceWorld RL training client."""
+"""ScienceWorld RL Training Client.
+
+This script trains an LLM agent to complete science tasks in ScienceWorld.
+
+Usage:
+    # Start ScienceWorld server first (in another terminal):
+    python -m opentinker.environment.sciworld.sciworld_server --port 8092
+
+    # Run training:
+    python sciworld_rl.py scheduler_url=http://localhost:8780 num_gpus=2
+"""
 
 from omegaconf import OmegaConf
 import hydra
@@ -29,7 +39,7 @@ def main(args):
                 token2text=True,
             )
         except Exception as e:
-            print(f"Failed to initialize Weave tracing: {e}")
+            print(f"\u26a0 Failed to initialize Weave tracing: {e}")
 
     print("=" * 60)
     print("Training with ScienceWorld Environment")
@@ -40,9 +50,11 @@ def main(args):
 
     print(f"\nConnecting to scheduler at {scheduler_url}")
     if scheduler_api_key:
-        print("Using API key for authentication")
+        print("\u2713 Using API key for authentication")
     else:
-        print("No API key provided - authentication may fail if scheduler requires it")
+        print(
+            "\u26a0 No API key provided - authentication may fail if scheduler requires it"
+        )
 
     scheduler_client = SchedulerClient(
         scheduler_url=scheduler_url, api_key=scheduler_api_key
@@ -60,7 +72,7 @@ def main(args):
     server_url = job_result["server_url"]
     lifecycle.register_job(scheduler_client, job_id)
 
-    print(f"\nJob {job_id} allocated")
+    print(f"\n\u2713 Job {job_id} allocated!")
     print(f"  Server URL: {server_url}")
     print(f"  GPUs: {job_result.get('gpu_ids')}")
     print(f"  Port: {job_result.get('port')}")
@@ -95,16 +107,16 @@ def main(args):
         job_id=job_id,
     )
 
-    print("Environment created")
+    print("\u2713 Environment created")
     print(f"  Interaction config path: {env.get_interaction_config_path()}")
 
     game_stats = GameStatsClient(env_endpoint, job_id=env.job_id)
     if game_stats.health_check():
-        print(f"Connected to ScienceWorld server for metrics at {env_endpoint}")
+        print(f"\u2713 Connected to ScienceWorld server for metrics at {env_endpoint}")
         game_stats.reset_all()
     else:
         print(
-            f"ScienceWorld server at {env_endpoint} not responding - metrics disabled"
+            f"\u26a0 ScienceWorld server at {env_endpoint} not responding - metrics disabled"
         )
         game_stats = None
 
@@ -145,14 +157,19 @@ def main(args):
         )
 
         print("\n" + "=" * 60)
-        print("Training completed")
+        print("Training completed!")
         print(f"Final training metrics: {final_metrics}")
+
+        # Display final cumulative game stats
         if game_stats:
             print("\n" + "-" * 40)
             print("Final Game Statistics:")
             cumulative = game_stats.get_all_stats()
             if cumulative:
                 print(f"  Total episodes: {cumulative.get('total_games', 0):.0f}")
+                print(f"  Success rate: {cumulative.get('cumulative_win_rate', 0):.1%}")
+                print(f"  Total successes: {cumulative.get('total_wins', 0):.0f}")
+                print(f"  Total failures: {cumulative.get('total_losses', 0):.0f}")
         print("=" * 60)
     finally:
         env.cleanup()
