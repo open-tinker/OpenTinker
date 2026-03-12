@@ -12,7 +12,6 @@ import logging
 import random
 import re
 import threading
-from collections import defaultdict
 from typing import Any, Dict, Iterable, List, Optional
 
 from opentinker.environment.base_game import AbstractGame, StepResult
@@ -335,7 +334,7 @@ class SciWorldGame(AbstractGame):
         self._current_obs = str(observation)
         self._current_info = info if isinstance(info, dict) else {}
         self._task_desc = self._get_task_description()
-        self._admissible_actions = self._get_admissible_actions()
+        self._admissible_actions = self._extract_valid_actions_from_info(self._current_info)
         self._done = False
         self._step_count = 0
         self._score = self._extract_score(self._current_info)
@@ -360,7 +359,7 @@ class SciWorldGame(AbstractGame):
 
         self._current_obs = str(observation)
         self._current_info = info
-        self._admissible_actions = self._get_admissible_actions()
+        self._admissible_actions = self._extract_valid_actions_from_info(self._current_info)
 
         # Enforce step limit
         if self._step_count >= self.max_steps and not done:
@@ -464,9 +463,13 @@ class SciWorldGame(AbstractGame):
         self, info: Dict[str, Any], observation: str
     ) -> Optional[bool]:
         for key in ("valid", "action_valid", "validAction"):
-            value = self._coerce_optional_bool(info.get(key))
-            if value is not None:
-                return value
+            value = info.get(key)
+            # ScienceWorld stores valid action *list* under "valid" — skip it
+            if isinstance(value, (list, dict)):
+                continue
+            coerced = self._coerce_optional_bool(value)
+            if coerced is not None:
+                return coerced
 
         lowered = observation.lower()
         invalid_markers = [
@@ -502,102 +505,19 @@ class SciWorldGame(AbstractGame):
             return task_desc
         return f"Complete ScienceWorld task {self._current_task_name}."
 
-    MAX_ACTIONS_PER_TEMPLATE = 10
-
-    def _get_admissible_actions(self) -> List[str]:
-        self._ensure_env()
-
-        # Try template-aware method first for balanced sampling
-        method = getattr(
-            self._env, "getValidActionObjectCombinationsWithTemplates", None
-        )
-        if callable(method):
-            try:
-                value = method()
-                if isinstance(value, (list, tuple, set)):
-                    return self._dedupe_by_template(list(value))
-            except Exception:
-                pass
-
-        # Fallback to simpler methods
-        candidates = []
-        for method_name in (
-            "getValidActionObjectCombinations",
-            "getValidActions",
-        ):
-            method = getattr(self._env, method_name, None)
-            if not callable(method):
-                continue
-            try:
-                value = method()
-            except Exception:
-                continue
-            if isinstance(value, dict):
-                value = list(value.keys())
-            if isinstance(value, (list, tuple, set)):
-                processed = []
-                for v in value:
-                    if isinstance(v, dict) and "action" in v:
-                        processed.append(str(v["action"]).strip())
-                    elif isinstance(v, str):
-                        processed.append(v.strip())
-                    else:
-                        processed.append(str(v).strip())
-                candidates = [c for c in processed if c]
-                break
-
-        deduped = []
+    def _extract_valid_actions_from_info(self, info: Dict[str, Any]) -> List[str]:
+        """Extract valid action list from ScienceWorld's info['valid']."""
+        valid = info.get("valid", [])
+        if not isinstance(valid, list):
+            return []
+        actions = []
         seen = set()
-        for action in candidates:
-            if action not in seen:
-                seen.add(action)
-                deduped.append(action)
-
-        return deduped[: self.max_action_candidates]
-
-    def _dedupe_by_template(self, raw_actions: List) -> List[str]:
-        """Group actions by template_id and keep up to MAX_ACTIONS_PER_TEMPLATE per group.
-
-        This ensures all action types (open, pick up, connect, etc.) are represented
-        without any single type (e.g. connect with 300+ combos) dominating the list.
-        """
-        template_groups: dict = defaultdict(list)
-        no_template: list = []
-
-        seen = set()
-        for v in raw_actions:
-            if isinstance(v, dict) and "action" in v:
-                action_str = str(v["action"]).strip()
-                template_id = v.get("template_id", None)
-            elif isinstance(v, str):
-                action_str = v.strip()
-                template_id = None
-            else:
-                action_str = str(v).strip()
-                template_id = None
-
-            if not action_str or action_str in seen:
-                continue
-            seen.add(action_str)
-
-            if template_id is not None:
-                template_groups[template_id].append(action_str)
-            else:
-                no_template.append(action_str)
-
-        # Sample up to MAX_ACTIONS_PER_TEMPLATE from each template group
-        result = []
-        for tid in sorted(template_groups.keys()):
-            group = template_groups[tid]
-            if len(group) <= self.MAX_ACTIONS_PER_TEMPLATE:
-                result.extend(group)
-            else:
-                result.extend(random.sample(group, self.MAX_ACTIONS_PER_TEMPLATE))
-
-        # Add ungrouped actions
-        result.extend(no_template)
-
-        return result[: self.max_action_candidates]
+        for v in valid:
+            a = str(v).strip()
+            if a and a not in seen:
+                seen.add(a)
+                actions.append(a)
+        return actions
 
     def _format_observation(self, observation: str) -> str:
         parts = [
