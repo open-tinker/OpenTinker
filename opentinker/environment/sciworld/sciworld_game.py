@@ -235,52 +235,65 @@ class SciWorldGame(AbstractGame):
         if task_name in self._variation_cache:
             return self._variation_cache[task_name]
 
-        if self.variation_indices:
-            variations = list(self.variation_indices)
-        else:
-            split_method_candidates = {
-                "train": [
-                    "getVariationsTrain",
-                    "getTrainVariations",
-                    "getTaskTrainVariations",
-                ],
-                "dev": [
-                    "getVariationsDev",
-                    "getDevVariations",
-                    "getTaskDevVariations",
-                ],
-                "test": [
-                    "getVariationsTest",
-                    "getTestVariations",
-                    "getTaskTestVariations",
-                ],
-            }
-            generic_candidates = [
-                "getVariationsForTask",
-                "getTaskVariations",
-                "getVariations",
-                "getVariationIndices",
-                "getNumVariations",
-            ]
+        # 1. Get the ground-truth valid variations from the environment for this task/split
+        split_method_candidates = {
+            "train": [
+                "getVariationsTrain",
+                "getTrainVariations",
+                "getTaskTrainVariations",
+            ],
+            "dev": [
+                "getVariationsDev",
+                "getDevVariations",
+                "getTaskDevVariations",
+            ],
+            "test": [
+                "getVariationsTest",
+                "getTestVariations",
+                "getTaskTestVariations",
+            ],
+        }
+        generic_candidates = [
+            "getVariationsForTask",
+            "getTaskVariations",
+            "getVariations",
+            "getVariationIndices",
+            "getNumVariations",
+        ]
 
-            variations = []
-            for method_name in split_method_candidates.get(self.split, []):
-                variations = self._call_variation_method(method_name, task_name) or []
-                if variations:
+        env_variations = []
+        for method_name in split_method_candidates.get(self.split, []):
+            env_variations = self._call_variation_method(method_name, task_name) or []
+            if env_variations:
+                break
+
+        if not env_variations:
+            for method_name in generic_candidates:
+                env_variations = (
+                    self._call_variation_method(method_name, task_name) or []
+                )
+                if env_variations:
                     break
 
-            if not variations:
-                for method_name in generic_candidates:
-                    variations = (
-                        self._call_variation_method(method_name, task_name) or []
-                    )
-                    if variations:
-                        break
+        if not env_variations:
+            env_variations = [0]
 
-            if not variations:
-                variations = [0]
+        # 2. If user provided a specific set of indices, take the intersection
+        if self.variation_indices:
+            user_indices = set(self.variation_indices)
+            env_indices = set(env_variations)
+            variations = sorted(list(user_indices.intersection(env_indices)))
 
-        variations = sorted({int(v) for v in variations})
+            # If intersection is empty, fall back to environment defaults to prevent crash
+            if not variations:
+                logger.warning(
+                    f"Task {task_name!r} has no overlap with provided variation_indices. "
+                    f"Falling back to environment's variations."
+                )
+                variations = sorted(env_variations)
+        else:
+            variations = sorted(env_variations)
+
         self._variation_cache[task_name] = variations
         return variations
 
@@ -297,16 +310,52 @@ class SciWorldGame(AbstractGame):
             )
 
         variations = self._resolve_variations_for_task(selected_task)
-        if variation is not None and int(variation) in variations:
-            selected_variation = int(variation)
+
+        # 1. Determine initial selection
+        if variation is not None:
+            v_int = int(variation)
+            if v_int in variations:
+                selected_variation = v_int
+            else:
+                # Fallback to a valid one from the list via modulo
+                selected_variation = variations[v_int % len(variations)]
         else:
-            if variation is not None:
-                logger.warning(
-                    f"Variation {variation} is not valid for task {selected_task!r} "
-                    f"under split={self.split!r}. Available={variations[:20]}. "
-                    f"Falling back to random valid variation."
-                )
             selected_variation = random.choice(variations)
+
+        # 2. MANDATORY HARD LIMIT CHECK
+        # ScienceWorld often has a task-specific maximum variations.
+        # We try several ways to find the absolute limit to prevent the Java-side error.
+        limit = 1000000  # Default huge
+
+        # Try to get the count from various scienceworld metadata sources
+        for method_name in ["getMaxVariations", "getNumVariations", "getVariationCount"]:
+            try:
+                m = getattr(self._env, method_name, None)
+                if callable(m):
+                    # Try with task name, then without
+                    for args in ((selected_task,), ()):
+                        try:
+                            res = m(*args)
+                            if isinstance(res, int) and res > 0:
+                                limit = min(limit, res)
+                                break
+                        except Exception:
+                            continue
+            except Exception:
+                pass
+
+        # If we have a list of variations from _resolve, its max is also a limit
+        if variations:
+            limit = min(limit, max(variations) + 1)
+
+        # If our selection still exceeds the limit, force it down
+        if selected_variation >= limit:
+            old_v = selected_variation
+            selected_variation = old_v % limit
+            logger.warning(
+                f"Forced fix: variation {old_v} exceeds limit {limit} for task {selected_task!r}. "
+                f"New variation: {selected_variation}"
+            )
 
         return selected_task, selected_variation
 
