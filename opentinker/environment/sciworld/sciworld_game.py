@@ -12,6 +12,7 @@ import logging
 import random
 import re
 import threading
+from collections import defaultdict
 from typing import Any, Dict, Iterable, List, Optional
 
 from opentinker.environment.base_game import AbstractGame, StepResult
@@ -36,7 +37,7 @@ class SciWorldGame(AbstractGame):
     REWARD_INVALID_ACTION = -0.1
 
     DEFAULT_MAX_STEPS = 30
-    DEFAULT_MAX_ACTIONS = 30
+    DEFAULT_MAX_ACTIONS = 50
     DEFAULT_LOCAL_THREAD_BASE = 20000
 
     _thread_lock = threading.Lock()
@@ -370,6 +371,7 @@ class SciWorldGame(AbstractGame):
             self._current_obs = str(observation)
 
         score = self._extract_score(info, default=self._score)
+        score_delta = score - self._score
         success = self._extract_success(
             done=done, reward=reward, info=info, score=score
         )
@@ -377,10 +379,9 @@ class SciWorldGame(AbstractGame):
             info=info, observation=self._current_obs
         )
 
-        if done and success:
-            final_reward = self.REWARD_SUCCESS
-        elif done:
-            final_reward = self.REWARD_FAILURE
+        # Use ScienceWorld's score delta as reward signal (0-100 scale → 0-1)
+        if score_delta > 0:
+            final_reward = score_delta / 100.0
         elif valid_action is False:
             final_reward = self.REWARD_INVALID_ACTION
         else:
@@ -499,11 +500,26 @@ class SciWorldGame(AbstractGame):
             return task_desc
         return f"Complete ScienceWorld task {self._current_task_name}."
 
+    MAX_ACTIONS_PER_TEMPLATE = 10
+
     def _get_admissible_actions(self) -> List[str]:
         self._ensure_env()
+
+        # Try template-aware method first for balanced sampling
+        method = getattr(
+            self._env, "getValidActionObjectCombinationsWithTemplates", None
+        )
+        if callable(method):
+            try:
+                value = method()
+                if isinstance(value, (list, tuple, set)):
+                    return self._dedupe_by_template(list(value))
+            except Exception:
+                pass
+
+        # Fallback to simpler methods
         candidates = []
         for method_name in (
-            "getValidActionObjectCombinationsWithTemplates",
             "getValidActionObjectCombinations",
             "getValidActions",
         ):
@@ -534,7 +550,52 @@ class SciWorldGame(AbstractGame):
             if action not in seen:
                 seen.add(action)
                 deduped.append(action)
+
         return deduped[: self.max_action_candidates]
+
+    def _dedupe_by_template(self, raw_actions: List) -> List[str]:
+        """Group actions by template_id and keep up to MAX_ACTIONS_PER_TEMPLATE per group.
+
+        This ensures all action types (open, pick up, connect, etc.) are represented
+        without any single type (e.g. connect with 300+ combos) dominating the list.
+        """
+        template_groups: dict = defaultdict(list)
+        no_template: list = []
+
+        seen = set()
+        for v in raw_actions:
+            if isinstance(v, dict) and "action" in v:
+                action_str = str(v["action"]).strip()
+                template_id = v.get("template_id", None)
+            elif isinstance(v, str):
+                action_str = v.strip()
+                template_id = None
+            else:
+                action_str = str(v).strip()
+                template_id = None
+
+            if not action_str or action_str in seen:
+                continue
+            seen.add(action_str)
+
+            if template_id is not None:
+                template_groups[template_id].append(action_str)
+            else:
+                no_template.append(action_str)
+
+        # Sample up to MAX_ACTIONS_PER_TEMPLATE from each template group
+        result = []
+        for tid in sorted(template_groups.keys()):
+            group = template_groups[tid]
+            if len(group) <= self.MAX_ACTIONS_PER_TEMPLATE:
+                result.extend(group)
+            else:
+                result.extend(random.sample(group, self.MAX_ACTIONS_PER_TEMPLATE))
+
+        # Add ungrouped actions
+        result.extend(no_template)
+
+        return result[: self.max_action_candidates]
 
     def _format_observation(self, observation: str) -> str:
         parts = [
