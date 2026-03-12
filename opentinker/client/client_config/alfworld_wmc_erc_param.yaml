@@ -1,0 +1,86 @@
+# ALFWorld Training Configuration with WMC-ERC Dynamic Entropy Clipping
+# Use with: python alfworld_rl.py --config-name alfworld_wmc_erc_param
+#
+# WMC-ERC (World Model-Conditioned Entropy Regularized Co-evolution):
+# Uses the LLM's prediction entropy at env token positions as a World Model
+# uncertainty signal (H_WM) to dynamically gate policy gradient updates.
+# Prevents entropy collapse in well-understood regions while permitting
+# exploration in uncertain ones.
+
+# Project settings
+project_name: opentinker
+experiment_name: alfworld_wmc_erc
+
+# Logging
+logger_backends: ["console", "wandb"]
+
+# Tracing (optional)
+enable_tracing: true
+weave_project: null
+
+# WandB (optional)
+wandb_key: null
+
+# Model and tokenizer
+tokenizer_path: null
+
+# Training parameters
+batch_size: 8
+num_workers: 4
+num_epochs: null
+num_steps: 1000
+save_freq: 200
+test_freq: 50
+
+# Validation parameters
+val_batch_size: 50
+
+# Generation parameters
+temperature: 1
+top_p: 1
+max_new_tokens: 4096
+max_prompt_tokens: 2048
+
+# Algorithm (must be agent_loop for multi-turn)
+algorithm: "agent_loop"
+
+# Use per-step advantage for multi-turn credit assignment
+adv_estimator: "grpo_per_step"
+rollout_n: 8
+
+# WMC-ERC: Dynamic Entropy Clipping
+# - mu_base: base clipping coefficient (controls tightness of the gate)
+# - lambda_wm: how much WM uncertainty widens the gate (higher = more tolerant in unknown regions)
+# - enable: master switch
+wmc_erc:
+  enable: true
+  mu_base: 1.0
+  lambda_wm: 1.0
+
+# Interaction configuration
+interaction:
+  name: alfworld
+  class_path: opentinker.environment.gym_environment_interaction.GymEnvironmentInteraction
+  config:
+    env_host: 0.0.0.0
+    env_port: 8092
+    env_endpoint: http://${interaction.config.env_host}:${interaction.config.env_port}
+    env_shards: 32
+    max_steps: 20
+    max_total_steps: 20
+    observation_template: "{observation}"
+    split: train
+
+multi_turn:
+  max_user_turns: ${interaction.config.max_total_steps}
+  max_assistant_turns: ${interaction.config.max_total_steps}
+  max_tokens_per_turn: 512
+  weave_project: null
+  experiment_name: "alfworld_wmc_erc"
+
+# Scheduler settings
+scheduler_url: "http://0.0.0.0:8780"
+scheduler_api_key: null
+
+# GPU settings
+num_gpus: 8

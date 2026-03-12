@@ -1080,6 +1080,7 @@ class PPOTrainingServerBackend:
                 # ===== DEBUG LOGGING END =====
 
                 metrics.update(old_log_prob_metrics)
+                _wmc_erc_entropys = entropys  # Preserve for WMC-ERC before pop
                 old_log_prob.batch.pop("entropys")
                 batch = batch.union(old_log_prob)
                 logger.info(
@@ -1160,6 +1161,16 @@ class PPOTrainingServerBackend:
                     norm_adv_by_std_in_grpo=norm_adv_by_std_in_grpo,
                     config=self.config.algorithm,
                 )
+
+            # 9.5 WMC-ERC: Dynamic entropy clipping
+            wmc_erc_cfg = OmegaConf.select(self.config, "wmc_erc", default=None)
+            if wmc_erc_cfg and wmc_erc_cfg.get("enable", False):
+                from opentinker.backend_patch.verl.trainer.ppo.wmc_erc import apply_wmc_erc
+                batch, wmc_metrics = apply_wmc_erc(batch, _wmc_erc_entropys, wmc_erc_cfg)
+                metrics.update(wmc_metrics)
+                logger.info(f"[WMC-ERC] mask_ratio={wmc_metrics.get('wmc_erc/mask_ratio', 'N/A'):.3f}, "
+                            f"s_star={wmc_metrics.get('wmc_erc/s_star_mean', 'N/A'):.4f}, "
+                            f"h_wm={wmc_metrics.get('wmc_erc/h_wm_mean', 'N/A'):.4f}")
 
             # 10. Update critic
             if self.use_critic:
