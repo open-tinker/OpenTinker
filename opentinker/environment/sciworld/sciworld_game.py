@@ -517,7 +517,15 @@ class SciWorldGame(AbstractGame):
             if isinstance(value, dict):
                 value = list(value.keys())
             if isinstance(value, (list, tuple, set)):
-                candidates = [str(v).strip() for v in value if str(v).strip()]
+                processed = []
+                for v in value:
+                    if isinstance(v, dict) and "action" in v:
+                        processed.append(str(v["action"]).strip())
+                    elif isinstance(v, str):
+                        processed.append(v.strip())
+                    else:
+                        processed.append(str(v).strip())
+                candidates = [c for c in processed if c]
                 break
 
         deduped = []

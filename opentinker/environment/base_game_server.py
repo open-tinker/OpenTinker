@@ -31,8 +31,9 @@ Example:
     run_game_server(MyGame, port=8081, board_size=9)
 """
 
+import asyncio
 import threading
-from collections import defaultdict
+from collections import defaultdict, deque
 from typing import Any, Dict, List, Optional, Type
 
 from fastapi import FastAPI, HTTPException
@@ -368,6 +369,13 @@ def create_game_app(
     Parallelism is achieved via sharding (multiple server processes on consecutive ports).
     Each shard handles requests independently with its own in-memory instance registry.
 
+    Game instances are pooled: when an episode finishes, the instance is returned to a
+    pool for reuse rather than being destroyed. This avoids expensive re-initialization
+    (e.g., JVM startup for ScienceWorld).
+
+    Blocking game operations (reset/step) are offloaded to a thread pool so the async
+    event loop is never blocked and concurrent requests can be processed in parallel.
+
     Args:
         game_class: The AbstractGame subclass to use
         stats_class: Optional custom stats class (e.g., GomokuGameStats).
@@ -382,6 +390,22 @@ def create_game_app(
     # Shared state
     games: Dict[str, AbstractGame] = {}
     games_lock = threading.Lock()  # Thread-safe access to games dict
+
+    # Pool of idle game instances available for reuse (avoids JVM/subprocess churn)
+    game_pool: deque[AbstractGame] = deque()
+    pool_lock = threading.Lock()
+
+    def _get_or_create_game() -> AbstractGame:
+        """Get a game instance from the pool, or create a new one."""
+        with pool_lock:
+            if game_pool:
+                return game_pool.popleft()
+        return game_class(**game_kwargs)
+
+    def _return_to_pool(game: AbstractGame) -> None:
+        """Return a game instance to the pool for reuse."""
+        with pool_lock:
+            game_pool.append(game)
 
     # Use MultiJobGameStats for job isolation
     multi_stats = MultiJobGameStats(stats_class=stats_class or BaseGameStats)
@@ -403,11 +427,11 @@ def create_game_app(
             if instance_id in games:
                 game = games[instance_id]
             else:
-                game = game_class(**game_kwargs)
+                game = _get_or_create_game()
                 games[instance_id] = game
 
-        # Reset the game (this is the slow part)
-        observation = game.reset(**reset_kwargs)
+        # Reset the game in a thread (avoids blocking the event loop for JVM/subprocess envs)
+        observation = await asyncio.to_thread(game.reset, **reset_kwargs)
 
         # Track that this game has started (with job isolation)
         stats = multi_stats.get_job_stats(job_id)
@@ -436,8 +460,8 @@ def create_game_app(
         instance_id = request.instance_id
         with games_lock:
             if instance_id in games:
-                _close_game_instance(games[instance_id])
-                del games[instance_id]
+                game = games.pop(instance_id)
+                _close_game_instance(game)
                 return {"message": f"Instance {instance_id} removed"}
         return {"message": f"Instance {instance_id} not found", "status": "ignored"}
 
@@ -455,7 +479,8 @@ def create_game_app(
             )
 
         game = games[instance_id]
-        result = game.step(action)
+        # Run blocking game.step() in a thread to avoid blocking the event loop
+        result = await asyncio.to_thread(game.step, action)
 
         # Record statistics with instance_id for per-game tracking (with job isolation)
         stats = multi_stats.get_job_stats(job_id)
@@ -463,12 +488,13 @@ def create_game_app(
             result.info, result.reward, result.done, instance_id, job_id
         )
 
-        # Clean up finished games
+        # Return finished game instances to the pool for reuse instead of destroying them.
+        # This avoids expensive re-initialization (JVM startup, subprocess launch, etc.).
         if result.done:
             with games_lock:
                 if instance_id in games:
-                    _close_game_instance(games[instance_id])
-                    del games[instance_id]
+                    finished_game = games.pop(instance_id)
+                    _return_to_pool(finished_game)
 
         return {
             "observation": result.observation,

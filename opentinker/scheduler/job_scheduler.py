@@ -10,6 +10,7 @@ launches HTTP training servers, and handles job lifecycle management.
 import logging
 import os
 import subprocess
+import sys
 import threading
 import time
 import uuid
@@ -238,12 +239,15 @@ def check_gpu_available(gpu_id: int) -> bool:
     - Scheduler restarts and loses allocation state
     - Jobs crash without properly releasing resources
 
+    NOTE: Currently disabled to allow shared GPU environments.
+
     Args:
         gpu_id: GPU ID to check
 
     Returns:
         True if GPU is idle and available, False if occupied or check fails
     """
+    return True  # Skip GPU check for shared environments
     try:
         import subprocess
 
@@ -284,7 +288,7 @@ def check_gpu_available(gpu_id: int) -> bool:
             return True  # Fail open
 
         # Thresholds for considering a GPU "idle"
-        MAX_MEMORY_MB = 10  # Allow up to 100 MB (some baseline CUDA overhead)
+        MAX_MEMORY_MB = 40000  # Allow up to 40 GB (for shared GPU environments)
         MAX_UTILIZATION = 1000  # Allow up to 5% utilization
 
         if memory_used_mb > MAX_MEMORY_MB or utilization_percent > MAX_UTILIZATION:
@@ -293,36 +297,6 @@ def check_gpu_available(gpu_id: int) -> bool:
                 f"Utilization: {utilization_percent}% (thresholds: {MAX_MEMORY_MB} MB, {MAX_UTILIZATION}%)"
             )
             return False
-
-        # Check 2: Look for running processes on this GPU
-        pmon_result = subprocess.run(
-            ["nvidia-smi", "pmon", "-c", "1", "-s", "um"],
-            capture_output=True,
-            text=True,
-            timeout=5,
-        )
-
-        if pmon_result.returncode == 0:
-            # Parse pmon output to check for processes on this GPU
-            # Format: "# gpu   pid  type   sm  mem   enc   dec   command"
-            #         "  0   12345   C    50   500     0     0   python"
-            lines = pmon_result.stdout.strip().split("\n")
-            for line in lines:
-                if line.startswith("#") or not line.strip():
-                    continue
-                parts = line.split()
-                if len(parts) >= 2:
-                    try:
-                        gpu_idx = int(parts[0].strip())
-                        if gpu_idx == gpu_id and parts[1].strip() != "-":
-                            # Found a process on this GPU
-                            pid = parts[1].strip()
-                            logger.warning(
-                                f"GPU {gpu_id}: ⚠️ OCCUPIED - Process {pid} detected via pmon"
-                            )
-                            return False
-                    except (ValueError, IndexError):
-                        continue
 
         # All checks passed - GPU is idle
         logger.debug(
@@ -1039,10 +1013,14 @@ class JobSchedulerActor:
         env["CUDA_VISIBLE_DEVICES"] = ",".join(map(str, job.gpu_ids))
         # Pass job_id to agent loop for per-client trace subdirectory isolation
         env["ROLLOUT_TRACE_JOB_ID"] = job.job_id
+        # Ensure the current Python env's bin dir is on PATH (for ninja, etc.)
+        python_bin_dir = os.path.dirname(sys.executable)
+        if python_bin_dir not in env.get("PATH", "").split(os.pathsep):
+            env["PATH"] = python_bin_dir + os.pathsep + env.get("PATH", "")
 
         # Build command line arguments from config
         cmd = [
-            "python",
+            sys.executable,
             self.server_script_path,
             f"server.port={job.port}",
             f"job_id={job.job_id}",
@@ -1085,12 +1063,18 @@ class JobSchedulerActor:
         if kl_config:
             use_kl_in_reward = kl_config.get("use_kl_in_reward")
             if use_kl_in_reward is not None:
-                cmd.append(f"algorithm.use_kl_in_reward={str(use_kl_in_reward).lower()}")
-                logger.info(f"Job {job.job_id}: ✓ KL use_kl_in_reward={use_kl_in_reward}")
+                cmd.append(
+                    f"algorithm.use_kl_in_reward={str(use_kl_in_reward).lower()}"
+                )
+                logger.info(
+                    f"Job {job.job_id}: ✓ KL use_kl_in_reward={use_kl_in_reward}"
+                )
 
             use_kl_loss = kl_config.get("use_kl_loss")
             if use_kl_loss is not None:
-                cmd.append(f"actor_rollout_ref.actor.use_kl_loss={str(use_kl_loss).lower()}")
+                cmd.append(
+                    f"actor_rollout_ref.actor.use_kl_loss={str(use_kl_loss).lower()}"
+                )
                 logger.info(f"Job {job.job_id}: ✓ KL use_kl_loss={use_kl_loss}")
 
             kl_loss_coef = kl_config.get("kl_loss_coef")
