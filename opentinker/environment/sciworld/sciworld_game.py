@@ -81,6 +81,8 @@ class SciWorldGame(AbstractGame):
         self._current_variation = -1
         self._current_info: Dict[str, Any] = {}
         self._admissible_actions: List[str] = []
+        self._action_templates: List[str] = []
+        self._objects: List[str] = []
         self._done = False
         self._step_count = 0
         self._score = 0.0
@@ -335,6 +337,8 @@ class SciWorldGame(AbstractGame):
         self._current_info = info if isinstance(info, dict) else {}
         self._task_desc = self._get_task_description()
         self._admissible_actions = self._extract_valid_actions_from_info(self._current_info)
+        self._action_templates = self._extract_action_templates()
+        self._objects = self._extract_objects()
         self._done = False
         self._step_count = 0
         self._score = self._extract_score(self._current_info)
@@ -360,6 +364,8 @@ class SciWorldGame(AbstractGame):
         self._current_obs = str(observation)
         self._current_info = info
         self._admissible_actions = self._extract_valid_actions_from_info(self._current_info)
+        self._action_templates = self._extract_action_templates()
+        self._objects = self._extract_objects()
 
         # Enforce step limit
         if self._step_count >= self.max_steps and not done:
@@ -519,6 +525,34 @@ class SciWorldGame(AbstractGame):
                 actions.append(a)
         return actions
 
+    def _extract_action_templates(self) -> List[str]:
+        """Get possible action templates from ScienceWorld (e.g. 'open OBJ')."""
+        self._ensure_env()
+        method = getattr(self._env, "getPossibleActions", None)
+        if not callable(method):
+            return []
+        try:
+            templates = method()
+        except Exception:
+            return []
+        if not isinstance(templates, (list, tuple)):
+            return []
+        return [str(t).strip() for t in templates if str(t).strip()]
+
+    def _extract_objects(self) -> List[str]:
+        """Get possible objects from ScienceWorld (e.g. 'door to kitchen')."""
+        self._ensure_env()
+        method = getattr(self._env, "getPossibleObjects", None)
+        if not callable(method):
+            return []
+        try:
+            objects = method()
+        except Exception:
+            return []
+        if not isinstance(objects, (list, tuple)):
+            return []
+        return [str(o).strip() for o in objects if str(o).strip()]
+
     def _format_observation(self, observation: str) -> str:
         parts = [
             "=== Current State ===",
@@ -538,9 +572,13 @@ class SciWorldGame(AbstractGame):
         if look and look != observation:
             parts.extend(["", "=== Look ===", look])
 
-        if self._admissible_actions:
-            parts.extend(["", "=== Candidate Actions ==="])
-            parts.extend(f"- {action}" for action in self._admissible_actions)
+        if self._action_templates:
+            parts.extend(["", "=== Action Templates ==="])
+            parts.extend(f"- {template}" for template in self._action_templates)
+
+        if self._objects:
+            parts.extend(["", "=== Objects ==="])
+            parts.extend(f"- {obj}" for obj in self._objects)
 
         return "\n".join(parts)
 
@@ -590,6 +628,8 @@ class SciWorldGame(AbstractGame):
             "max_steps": self.max_steps,
             "done": self._done,
             "candidate_actions": self._admissible_actions,
+            "action_templates": self._action_templates,
+            "objects": self._objects,
         }
 
     def generate_initial_state(self) -> Dict[str, Any]:
