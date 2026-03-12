@@ -463,7 +463,7 @@ class SciWorldGame(AbstractGame):
     def _extract_valid_action(
         self, info: Dict[str, Any], observation: str
     ) -> Optional[bool]:
-        for key in ("valid", "validAction", "action_valid"):
+        for key in ("valid", "action_valid", "validAction"):
             value = self._coerce_optional_bool(info.get(key))
             if value is not None:
                 return value
@@ -475,6 +475,8 @@ class SciWorldGame(AbstractGame):
             "i don't understand",
             "nothing happens",
             "you can't do that",
+            "no known action matches that input",
+            "ambiguous request",
         ]
         if any(marker in lowered for marker in invalid_markers):
             return False
