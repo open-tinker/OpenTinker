@@ -209,6 +209,14 @@ class AbstractGame(ABC):
         """
         return raw_action
 
+    def close(self) -> None:
+        """Release any external resources held by this game instance.
+
+        Override for environments that manage subprocesses, sockets, JVMs, or
+        other resources that should be cleaned up when an episode finishes.
+        """
+        return None
+
 
 class GameDataGenerator:
     """Data generator that works with any AbstractGame.
@@ -273,3 +281,13 @@ class GameDataGenerator:
     def get_interaction_name(self) -> str:
         """Return interaction name from game."""
         return self._game.get_interaction_name()
+
+    def close(self) -> None:
+        """Release resources held by the backing game instance."""
+        self._game.close()
+
+    def __del__(self):
+        try:
+            self.close()
+        except Exception:
+            pass

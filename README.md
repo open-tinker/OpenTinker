@@ -18,17 +18,17 @@
 
 Choose an example below to get started. Each example includes step-by-step instructions for setup, training, and inference.
 
-| Task                                             | Description                                                                          | Performance                                                                       |
-| ------------------------------------------------ | ------------------------------------------------------------------------------------ | --------------------------------------------------------------------------------- |
-| **[LLM Single-Turn Math](docs/math_singleturn.md)**                       | Mathematical problem solving                                     | [wandb](https://wandb.ai/zsqzz/Open-Tinker/runs/bwkq1wl8?nw=nwuserzhusq20)                                                                               |
-| **[LLM Multi-Turn Math](docs/math_multiturn.md)** | Multi-turn mathematical problem solving with tool calling                          | [wandb](https://wandb.ai/zsqzz/Open-Tinker/runs/f5pt6gcw?nw=nwuserzhusq20)                       |
-| **[LLM Single-LoRA Single-Turn Math](docs/math_lora_singleturn.md)**                  | Math single-turn Trained With LoRA                                                         | [wandb](https://wandb.ai/zsqzz/Open-Tinker/runs/cl1w5l07?nw=nwuserzhusq20)                        |
-| **[VLM Single-Turn Math](docs/vlm_geo3k_singleturn.md)**                    | geometry 3k math problem solving                                                          | [wandb](https://wandb.ai/zsqzz/Open-Tinker/runs/aidfc2y1?nw=nwuserzhusq20)                                                                               |
-| **[VLM Multi-Turn Math](docs/vlm_geo3k_multiturn.md)**             | geometry 3k math problem solving with tool calling                                           | [wandb](https://wandb.ai/zsqzz/Open-Tinker/runs/r39htm2o?nw=nwuserzhusq20)                |
-| **[LLM Gomoku Agent](docs/gomoku_multiturn.md)**       | A multi-turn gomoku agent | [wandb](https://wandb.ai/zsqzz/Open-Tinker/runs/7a7ggkw3?nw=nwuserzhusq20)                        |
-| **[LLM AlfWorld Agent](docs/alfworld_multiturn.md)**       | A multi-turn alfworld agent | [wandb](https://wandb.ai/1125027232/opentinker-public/runs/3jrlolk7?nw=nwuser1125027232)                        |
-| **[LLM Android World Agent](docs/android_world_multiturn.md)**       | A multi-turn android world agent |                         |
-
+| Task                                                                 | Description                                               | Performance                                                                              |
+| -------------------------------------------------------------------- | --------------------------------------------------------- | ---------------------------------------------------------------------------------------- |
+| **[LLM Single-Turn Math](docs/math_singleturn.md)**                  | Mathematical problem solving                              | [wandb](https://wandb.ai/zsqzz/Open-Tinker/runs/bwkq1wl8?nw=nwuserzhusq20)               |
+| **[LLM Multi-Turn Math](docs/math_multiturn.md)**                    | Multi-turn mathematical problem solving with tool calling | [wandb](https://wandb.ai/zsqzz/Open-Tinker/runs/f5pt6gcw?nw=nwuserzhusq20)               |
+| **[LLM Single-LoRA Single-Turn Math](docs/math_lora_singleturn.md)** | Math single-turn Trained With LoRA                        | [wandb](https://wandb.ai/zsqzz/Open-Tinker/runs/cl1w5l07?nw=nwuserzhusq20)               |
+| **[VLM Single-Turn Math](docs/vlm_geo3k_singleturn.md)**             | geometry 3k math problem solving                          | [wandb](https://wandb.ai/zsqzz/Open-Tinker/runs/aidfc2y1?nw=nwuserzhusq20)               |
+| **[VLM Multi-Turn Math](docs/vlm_geo3k_multiturn.md)**               | geometry 3k math problem solving with tool calling        | [wandb](https://wandb.ai/zsqzz/Open-Tinker/runs/r39htm2o?nw=nwuserzhusq20)               |
+| **[LLM Gomoku Agent](docs/gomoku_multiturn.md)**                     | A multi-turn gomoku agent                                 | [wandb](https://wandb.ai/zsqzz/Open-Tinker/runs/7a7ggkw3?nw=nwuserzhusq20)               |
+| **[LLM AlfWorld Agent](docs/alfworld_multiturn.md)**                 | A multi-turn alfworld agent                               | [wandb](https://wandb.ai/1125027232/opentinker-public/runs/3jrlolk7?nw=nwuser1125027232) |
+| **[LLM SciWorld Agent](docs/sciworld_multiturn.md)**                 | A multi-turn ScienceWorld agent                           |                                                                                          |
+| **[LLM Android World Agent](docs/android_world_multiturn.md)**       | A multi-turn android world agent                          |                                                                                          |
 
 ## 📦 Installation
 
@@ -149,12 +149,12 @@ This 2×2 design space enables four distinct paradigms, each suited to different
 
 ```
 @misc{zhu2026opentinkerseparatingconcernsagentic,
-      title={OpenTinker: Separating Concerns in Agentic Reinforcement Learning}, 
+      title={OpenTinker: Separating Concerns in Agentic Reinforcement Learning},
       author={Siqi Zhu and Jiaxuan You},
       year={2026},
       eprint={2601.07376},
       archivePrefix={arXiv},
       primaryClass={cs.AI},
-      url={https://arxiv.org/abs/2601.07376}, 
+      url={https://arxiv.org/abs/2601.07376},
 }
 ```

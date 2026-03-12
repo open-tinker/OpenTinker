@@ -153,6 +153,8 @@ class GameEnvironment(BaseEnvironment):
         self.train_dataloader = None
         self.val_dataloader = None
         self._interaction_config_path = None
+        self._train_generator = None
+        self._val_generator = None
 
         self._setup_dataloader()
         self._setup_interaction_config()
@@ -187,6 +189,7 @@ class GameEnvironment(BaseEnvironment):
             game_class=self.game_class,
             game_kwargs=self.game_kwargs,
         )
+        self._train_generator = train_generator
 
         print(f"Creating training dataset (virtual_size={virtual_size})")
         train_dataset = DynamicGameDataset(
@@ -216,6 +219,7 @@ class GameEnvironment(BaseEnvironment):
             game_kwargs=self.game_kwargs,
             seed=42,
         )
+        self._val_generator = val_generator
 
         val_dataset = DynamicGameDataset(
             data_generator=val_generator,
@@ -319,6 +323,17 @@ class GameEnvironment(BaseEnvironment):
         ):
             os.remove(self._interaction_config_path)
             print(f"Removed: {self._interaction_config_path}")
+        for resource in (
+            getattr(self, "_train_generator", None),
+            getattr(self, "_val_generator", None),
+            getattr(self, "_game_instance", None),
+        ):
+            close_fn = getattr(resource, "close", None)
+            if callable(close_fn):
+                try:
+                    close_fn()
+                except Exception as exc:
+                    print(f"[WARN] Failed to clean up {resource}: {exc}")
 
 
 def create_game_environment(
