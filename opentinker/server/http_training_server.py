@@ -27,6 +27,7 @@ Key Features:
 
 import asyncio
 import base64
+import gc
 import logging
 import signal
 import sys
@@ -943,7 +944,9 @@ class PPOTrainingServerBackend:
             # episodes into individual per-turn training samples, the gen_batch_output
             # batch size is larger than the original batch. We need to expand the
             # original batch to match using the expansion index.
-            expansion_index = gen_batch_output.meta_info.pop('per_turn_expansion_index', None)
+            expansion_index = gen_batch_output.meta_info.pop(
+                "per_turn_expansion_index", None
+            )
             if expansion_index is not None:
                 logger.info(
                     f"[Per-turn training] Expanding original batch from {len(batch)} to "
@@ -956,6 +959,7 @@ class PPOTrainingServerBackend:
                 elif batch.batch is not None:
                     # Empty TensorDict (all keys were popped) — create new one with expanded size
                     from tensordict import TensorDict
+
                     batch.batch = TensorDict({}, batch_size=[len(expansion_index)])
                 # Expand non-tensor batch
                 expanded_non_tensor = {}
@@ -1165,12 +1169,19 @@ class PPOTrainingServerBackend:
             # 9.5 WMC-ERC: Dynamic entropy clipping
             wmc_erc_cfg = OmegaConf.select(self.config, "wmc_erc", default=None)
             if wmc_erc_cfg and wmc_erc_cfg.get("enable", False):
-                from opentinker.backend_patch.verl.trainer.ppo.wmc_erc import apply_wmc_erc
-                batch, wmc_metrics = apply_wmc_erc(batch, _wmc_erc_entropys, wmc_erc_cfg)
+                from opentinker.backend_patch.verl.trainer.ppo.wmc_erc import (
+                    apply_wmc_erc,
+                )
+
+                batch, wmc_metrics = apply_wmc_erc(
+                    batch, _wmc_erc_entropys, wmc_erc_cfg
+                )
                 metrics.update(wmc_metrics)
-                logger.info(f"[WMC-ERC] mask_ratio={wmc_metrics.get('wmc_erc/mask_ratio', 'N/A'):.3f}, "
-                            f"s_star={wmc_metrics.get('wmc_erc/s_star_mean', 'N/A'):.4f}, "
-                            f"h_wm={wmc_metrics.get('wmc_erc/h_wm_mean', 'N/A'):.4f}")
+                logger.info(
+                    f"[WMC-ERC] mask_ratio={wmc_metrics.get('wmc_erc/mask_ratio', 'N/A'):.3f}, "
+                    f"s_star={wmc_metrics.get('wmc_erc/s_star_mean', 'N/A'):.4f}, "
+                    f"h_wm={wmc_metrics.get('wmc_erc/h_wm_mean', 'N/A'):.4f}"
+                )
 
             # 10. Update critic
             if self.use_critic:
@@ -1268,6 +1279,13 @@ class PPOTrainingServerBackend:
                         continue
 
             logger.info(f"Training step {self.global_steps} completed successfully")
+
+            # Free large intermediates and force garbage collection to prevent OOM
+            del batch, gen_batch, gen_batch_output, reward_tensor
+            if "_wmc_erc_entropys" in dir():
+                del _wmc_erc_entropys
+            gc.collect()
+            torch.cuda.empty_cache()
 
             return {
                 "status": "success",
@@ -1546,7 +1564,9 @@ class PPOTrainingServerBackend:
 
             # 6. Merge original batch and generated output
             # Per-turn training expansion: expand batch if gen output is larger
-            expansion_index = gen_batch_output.meta_info.pop('per_turn_expansion_index', None)
+            expansion_index = gen_batch_output.meta_info.pop(
+                "per_turn_expansion_index", None
+            )
             if expansion_index is not None:
                 logger.info(
                     f"[Per-turn training] Validation: Expanding original batch from {len(batch)} to "
@@ -1558,6 +1578,7 @@ class PPOTrainingServerBackend:
                 elif batch.batch is not None:
                     # Empty TensorDict (all keys were popped) — create new one with expanded size
                     from tensordict import TensorDict
+
                     batch.batch = TensorDict({}, batch_size=[len(expansion_index)])
                 expanded_non_tensor = {}
                 for k, v in batch.non_tensor_batch.items():
@@ -2117,6 +2138,13 @@ def launch_server(
                 namespace=_server_cfg.ray.namespace,
                 num_gpus=_server_cfg.trainer.n_gpus_per_node,  # Explicitly specify number of GPUs
                 ignore_reinit_error=True,
+                runtime_env={
+                    "env_vars": {
+                        "NCCL_CUMEM_ENABLE": "0",
+                        "VLLM_DISABLE_SLEEP_MODE": "1",
+                        "RAY_memory_usage_threshold": "0.99",
+                    },
+                },
             )
         else:
             # Connect to existing Ray cluster at specific address
@@ -2125,6 +2153,13 @@ def launch_server(
                 address=_server_cfg.ray.address,
                 namespace=_server_cfg.ray.namespace,
                 ignore_reinit_error=True,
+                runtime_env={
+                    "env_vars": {
+                        "NCCL_CUMEM_ENABLE": "0",
+                        "VLLM_DISABLE_SLEEP_MODE": "1",
+                        "RAY_memory_usage_threshold": "0.99",
+                    },
+                },
             )
 
         # Verify GPU availability

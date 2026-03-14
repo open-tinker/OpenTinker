@@ -65,7 +65,7 @@ interaction:
     env_host: 0.0.0.0
     env_port: 8092
     env_endpoint: http://${interaction.config.env_host}:${interaction.config.env_port}
-    env_shards: 32
+    env_shards: 1
     max_steps: 20
     max_total_steps: 20
     observation_template: "{observation}"
