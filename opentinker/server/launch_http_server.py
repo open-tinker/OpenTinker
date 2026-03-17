@@ -64,7 +64,7 @@ def main(cfg):
 
         cfg.actor_rollout_ref.rollout.tensor_model_parallel_size = 2
         cfg.actor_rollout_ref.rollout.name = "vllm"
-        cfg.actor_rollout_ref.rollout.gpu_memory_utilization = 0.6
+        cfg.actor_rollout_ref.rollout.gpu_memory_utilization = 0.15
 
         # GRPO/GRPO-per-step 特定配置
         # grpo_per_step uses the same training framework as grpo, just with different advantage estimation

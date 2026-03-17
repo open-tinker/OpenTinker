@@ -2143,6 +2143,7 @@ def launch_server(
                         "NCCL_CUMEM_ENABLE": "0",
                         "VLLM_DISABLE_SLEEP_MODE": "1",
                         "RAY_memory_usage_threshold": "0.99",
+                        "VLLM_GPU_MEMORY_UTILIZATION": "0.15",
                     },
                 },
             )
@@ -2158,6 +2159,7 @@ def launch_server(
                         "NCCL_CUMEM_ENABLE": "0",
                         "VLLM_DISABLE_SLEEP_MODE": "1",
                         "RAY_memory_usage_threshold": "0.99",
+                        "VLLM_GPU_MEMORY_UTILIZATION": "0.15",
                     },
                 },
             )

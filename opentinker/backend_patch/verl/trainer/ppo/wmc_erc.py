@@ -25,11 +25,13 @@ Core idea:
 - H_WM measures per-turn World Model uncertainty (prediction entropy at env tokens)
 - Dynamic mask m_t: when WM is confident but policy is overconfident → block update
                     when WM is uncertain → allow exploration regardless of confidence
+- Entropy floor: when per-turn action entropy falls below a threshold, force mask
+  to prevent entropy collapse even when z-score gating degrades
 
 Reference: World Model-Conditioned Entropy Regularized Co-evolution (WMC-ERC)
 """
 
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 import torch
@@ -90,6 +92,41 @@ def compute_s_star(
         s_star_per_sample.append(s_star_turns)
 
     return s_star_per_sample
+
+
+def compute_per_turn_entropy(
+    entropys: torch.Tensor,
+    response_mask: torch.Tensor,
+    turn_boundaries: List[List[Tuple[int, int]]],
+) -> List[List[torch.Tensor]]:
+    """Compute mean action-token entropy per turn.
+
+    Args:
+        entropys: (batch_size, response_length) entropy at all positions
+        response_mask: (batch_size, response_length) 1=action, 0=env/pad
+        turn_boundaries: per-sample list of (start, end) for action turns
+
+    Returns:
+        List of lists of scalar tensors, one mean entropy per turn per sample.
+    """
+    batch_size = entropys.shape[0]
+    device = entropys.device
+    ent_per_sample = []
+
+    for i in range(batch_size):
+        ent_turns = []
+        for start, end in turn_boundaries[i]:
+            H = entropys[i, start:end]
+            mask = response_mask[i, start:end]
+            count = mask.sum()
+            if count > 0:
+                ent_t = (H * mask).sum() / count
+            else:
+                ent_t = torch.tensor(0.0, device=device)
+            ent_turns.append(ent_t)
+        ent_per_sample.append(ent_turns)
+
+    return ent_per_sample
 
 
 def compute_h_wm(
@@ -157,26 +194,27 @@ def compute_dynamic_mask(
     h_wm_per_sample: List[List[torch.Tensor]],
     mu_base: float = 1.0,
     lambda_wm: float = 1.0,
+    per_turn_entropy: Optional[List[List[torch.Tensor]]] = None,
+    entropy_floor: float = 0.0,
 ) -> List[List[float]]:
     """Compute per-turn dynamic entropy clipping mask.
 
-    m_t = 1 if |S_*^t - S_bar| <= mu_base * (1 + lambda * H_WM^t) * sigma
-          0 otherwise
+    Two-stage gating:
 
-    Logic:
-    - WM confident (H_WM→0): threshold tightens → overconfident policy blocked
-      (prevents overfitting in well-understood regions)
-    - WM uncertain (H_WM large): threshold widens → exploration encouraged
-      (allows agent to gather data in unknown regions to train the WM)
+    Stage 1 (z-score): m_t = 1 if |S_*^t - S_bar| <= mu * (1 + lambda * H_WM^t) * sigma
+                             0 otherwise
 
-    H_WM is detached — it only acts as a scalar gate, never participates in
-    policy gradient backpropagation.
+    Stage 2 (entropy floor): if per-turn action entropy < entropy_floor → m_t = 0
+      This prevents the degenerate case where z-score gating fails because all
+      S_* values cluster near zero during entropy collapse.
 
     Args:
         s_star_per_sample: per-sample, per-turn S_* tensors
         h_wm_per_sample: per-sample, per-turn H_WM tensors
         mu_base: base clipping coefficient
         lambda_wm: WM uncertainty weight
+        per_turn_entropy: per-sample, per-turn mean action entropy (optional)
+        entropy_floor: minimum allowed per-turn entropy; turns below are masked
 
     Returns:
         List of lists of floats (0.0 or 1.0), one mask per turn per sample.
@@ -201,18 +239,37 @@ def compute_dynamic_mask(
         sigma = all_s_tensor.std(unbiased=False) + 1e-8
 
     mask_per_sample = []
+    n_zscore_masked = 0
+    n_entropy_floor_masked = 0
+
     for i in range(len(s_star_per_sample)):
         masks = []
         for t in range(len(s_star_per_sample[i])):
             s_t = s_star_per_sample[i][t].detach()
             h_t = h_wm_per_sample[i][t].detach()
 
+            # Stage 1: z-score gating
             threshold = mu_base * (1.0 + lambda_wm * h_t) * sigma
-            m_t = 1.0 if torch.abs(s_t - s_bar) <= threshold else 0.0
+            if torch.abs(s_t - s_bar) > threshold:
+                m_t = 0.0
+                n_zscore_masked += 1
+            # Stage 2: entropy floor gating
+            elif (
+                per_turn_entropy is not None
+                and entropy_floor > 0
+                and i < len(per_turn_entropy)
+                and t < len(per_turn_entropy[i])
+                and per_turn_entropy[i][t].detach().item() < entropy_floor
+            ):
+                m_t = 0.0
+                n_entropy_floor_masked += 1
+            else:
+                m_t = 1.0
+
             masks.append(m_t)
         mask_per_sample.append(masks)
 
-    return mask_per_sample
+    return mask_per_sample, n_zscore_masked, n_entropy_floor_masked
 
 
 def apply_wmc_erc(
@@ -225,10 +282,11 @@ def apply_wmc_erc(
     Pipeline:
     1. Compute turn boundaries from response_mask
     2. Compute S_* (policy blind confidence) per turn
-    3. Compute H_WM (world model uncertainty) per turn from env token entropys
-    4. Compute dynamic mask m_t per turn
-    5. Apply mask to advantages: A_masked = A * m_t (broadcast to tokens)
-    6. Return metrics for logging
+    3. Compute per-turn action entropy
+    4. Compute H_WM (world model uncertainty) per turn from env token entropys
+    5. Compute dynamic mask m_t per turn (z-score + entropy floor)
+    6. Apply mask to advantages: A_masked = A * m_t (broadcast to tokens)
+    7. Return metrics for logging
 
     Args:
         batch: DataProto or compatible object with batch dict containing
@@ -258,15 +316,28 @@ def apply_wmc_erc(
     # 2. S_* per turn
     s_star = compute_s_star(old_log_probs, entropys, response_mask, turn_boundaries)
 
-    # 3. H_WM per turn
+    # 3. Per-turn action entropy
+    turn_entropy = compute_per_turn_entropy(entropys, response_mask, turn_boundaries)
+
+    # 4. H_WM per turn
     h_wm = compute_h_wm(entropys, response_mask, attention_mask_response, turn_boundaries)
 
-    # 4. Dynamic mask
-    mu_base = float(wmc_erc_config.get("mu_base", 1.0) if hasattr(wmc_erc_config, 'get') else getattr(wmc_erc_config, 'mu_base', 1.0))
-    lambda_wm = float(wmc_erc_config.get("lambda_wm", 1.0) if hasattr(wmc_erc_config, 'get') else getattr(wmc_erc_config, 'lambda_wm', 1.0))
-    mask = compute_dynamic_mask(s_star, h_wm, mu_base, lambda_wm)
+    # 5. Dynamic mask (z-score + entropy floor)
+    _get = lambda key, default: (
+        wmc_erc_config.get(key, default) if hasattr(wmc_erc_config, 'get')
+        else getattr(wmc_erc_config, key, default)
+    )
+    mu_base = float(_get("mu_base", 1.0))
+    lambda_wm = float(_get("lambda_wm", 1.0))
+    entropy_floor = float(_get("entropy_floor", 0.0))
 
-    # 5. Apply mask to advantages (in-place)
+    mask, n_zscore_masked, n_entropy_floor_masked = compute_dynamic_mask(
+        s_star, h_wm, mu_base, lambda_wm,
+        per_turn_entropy=turn_entropy,
+        entropy_floor=entropy_floor,
+    )
+
+    # 6. Apply mask to advantages (in-place)
     batch_size = advantages.shape[0]
     for i in range(batch_size):
         for t, (start, end) in enumerate(turn_boundaries[i]):
@@ -274,15 +345,43 @@ def apply_wmc_erc(
                 advantages[i, start:end] *= mask[i][t]
     batch.batch["advantages"] = advantages
 
-    # 6. Metrics
+    # 7. Adaptive entropy control via beta_token
+    # Instead of fixed entropy_coeff, use per-token beta based on turn entropy.
+    # - turns with entropy < target → beta = entropy_coeff (encourage exploration)
+    # - turns with entropy >= target → beta = 0 (don't push entropy higher)
+    # This prevents both entropy collapse AND entropy explosion.
+    entropy_target = float(_get("entropy_target", 0.0))
+    base_entropy_coeff = float(_get("base_entropy_coeff", 0.0))
+
+    if entropy_target > 0 and base_entropy_coeff > 0:
+        beta_token = torch.zeros_like(advantages)
+        for i in range(batch_size):
+            for t, (start, end) in enumerate(turn_boundaries[i]):
+                if t < len(turn_entropy[i]):
+                    turn_ent = turn_entropy[i][t].detach().item()
+                    if turn_ent < entropy_target:
+                        # Linear scaling: full coeff at entropy=0, zero at target
+                        scale = max(0.0, 1.0 - turn_ent / entropy_target)
+                        beta_token[i, start:end] = base_entropy_coeff * scale
+                    # else: beta stays 0 (no entropy bonus for high-entropy turns)
+        batch.batch["beta_token"] = beta_token
+
+    # 8. Metrics
     all_s = [s.item() for turns in s_star for s in turns]
     all_h = [h.item() for turns in h_wm for h in turns]
     all_m = [m for turns in mask for m in turns]
+    all_te = [e.item() for turns in turn_entropy for e in turns]
 
     # WM NLL (monitoring only — not in backward pass for this prototype)
     env_mask = attention_mask_response * (1.0 - response_mask)
     env_count = env_mask.sum()
     wm_nll = (-(old_log_probs * env_mask).sum() / (env_count + 1e-8)).item() if env_count > 0 else 0.0
+
+    # Beta token stats for logging
+    beta_mean = 0.0
+    if entropy_target > 0 and base_entropy_coeff > 0:
+        active_beta = beta_token[response_mask.bool()]
+        beta_mean = active_beta.mean().item() if active_beta.numel() > 0 else 0.0
 
     metrics = {
         "wmc_erc/s_star_mean": float(np.mean(all_s)) if all_s else 0.0,
@@ -292,6 +391,10 @@ def apply_wmc_erc(
         "wmc_erc/num_masked_turns": sum(1 for m in all_m if m == 0.0),
         "wmc_erc/total_turns": len(all_m),
         "wmc_erc/wm_nll": wm_nll,
+        "wmc_erc/turn_entropy_mean": float(np.mean(all_te)) if all_te else 0.0,
+        "wmc_erc/n_zscore_masked": n_zscore_masked,
+        "wmc_erc/n_entropy_floor_masked": n_entropy_floor_masked,
+        "wmc_erc/adaptive_beta_mean": beta_mean,
     }
 
     return batch, metrics

@@ -44,9 +44,9 @@ max_prompt_tokens: 2048
 # Algorithm (must be agent_loop for multi-turn)
 algorithm: "agent_loop"
 
-# Use per-step advantage for multi-turn credit assignment
-adv_estimator: "grpo_per_step"
-rollout_n: 8
+# PPO with GAE advantage estimation (requires critic)
+adv_estimator: "gae"
+rollout_n: 1
 
 # WMC-ERC: Dynamic Entropy Clipping
 # - mu_base: base clipping coefficient (controls tightness of the gate)
@@ -55,7 +55,16 @@ rollout_n: 8
 wmc_erc:
   enable: true
   mu_base: 1.0
-  lambda_wm: 1.0
+  lambda_wm: 10.0
+  entropy_floor: 0.1
+  # Adaptive entropy control via beta_token (replaces fixed entropy_coeff)
+  # beta = base_entropy_coeff * max(0, 1 - turn_entropy/target) per turn
+  # -> full bonus at entropy=0, zero bonus at entropy=target, never pushes above target
+  entropy_target: 2.0
+  base_entropy_coeff: 0.02
+
+# Disable fixed entropy_coeff since adaptive beta_token handles it
+entropy_coeff: 0.0
 
 # Interaction configuration
 interaction:
@@ -65,7 +74,7 @@ interaction:
     env_host: 0.0.0.0
     env_port: 8092
     env_endpoint: http://${interaction.config.env_host}:${interaction.config.env_port}
-    env_shards: 1
+    env_shards: 8
     max_steps: 20
     max_total_steps: 20
     observation_template: "{observation}"
