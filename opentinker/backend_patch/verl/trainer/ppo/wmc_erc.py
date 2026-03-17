@@ -297,7 +297,11 @@ def apply_wmc_erc(
     Returns:
         (batch, metrics) where batch has masked advantages and metrics dict
     """
-    enable = wmc_erc_config.get("enable", True) if hasattr(wmc_erc_config, 'get') else getattr(wmc_erc_config, 'enable', True)
+    enable = (
+        wmc_erc_config.get("enable", True)
+        if hasattr(wmc_erc_config, "get")
+        else getattr(wmc_erc_config, "enable", True)
+    )
     if not enable:
         return batch, {}
 
@@ -320,11 +324,14 @@ def apply_wmc_erc(
     turn_entropy = compute_per_turn_entropy(entropys, response_mask, turn_boundaries)
 
     # 4. H_WM per turn
-    h_wm = compute_h_wm(entropys, response_mask, attention_mask_response, turn_boundaries)
+    h_wm = compute_h_wm(
+        entropys, response_mask, attention_mask_response, turn_boundaries
+    )
 
     # 5. Dynamic mask (z-score + entropy floor)
     _get = lambda key, default: (
-        wmc_erc_config.get(key, default) if hasattr(wmc_erc_config, 'get')
+        wmc_erc_config.get(key, default)
+        if hasattr(wmc_erc_config, "get")
         else getattr(wmc_erc_config, key, default)
     )
     mu_base = float(_get("mu_base", 1.0))
@@ -332,7 +339,10 @@ def apply_wmc_erc(
     entropy_floor = float(_get("entropy_floor", 0.0))
 
     mask, n_zscore_masked, n_entropy_floor_masked = compute_dynamic_mask(
-        s_star, h_wm, mu_base, lambda_wm,
+        s_star,
+        h_wm,
+        mu_base,
+        lambda_wm,
         per_turn_entropy=turn_entropy,
         entropy_floor=entropy_floor,
     )
@@ -375,7 +385,11 @@ def apply_wmc_erc(
     # WM NLL (monitoring only — not in backward pass for this prototype)
     env_mask = attention_mask_response * (1.0 - response_mask)
     env_count = env_mask.sum()
-    wm_nll = (-(old_log_probs * env_mask).sum() / (env_count + 1e-8)).item() if env_count > 0 else 0.0
+    wm_nll = (
+        (-(old_log_probs * env_mask).sum() / (env_count + 1e-8)).item()
+        if env_count > 0
+        else 0.0
+    )
 
     # Beta token stats for logging
     beta_mean = 0.0

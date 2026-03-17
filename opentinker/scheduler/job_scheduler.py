@@ -1059,12 +1059,18 @@ class JobSchedulerActor:
         if kl_config:
             use_kl_in_reward = kl_config.get("use_kl_in_reward")
             if use_kl_in_reward is not None:
-                cmd.append(f"algorithm.use_kl_in_reward={str(use_kl_in_reward).lower()}")
-                logger.info(f"Job {job.job_id}: ✓ KL use_kl_in_reward={use_kl_in_reward}")
+                cmd.append(
+                    f"algorithm.use_kl_in_reward={str(use_kl_in_reward).lower()}"
+                )
+                logger.info(
+                    f"Job {job.job_id}: ✓ KL use_kl_in_reward={use_kl_in_reward}"
+                )
 
             use_kl_loss = kl_config.get("use_kl_loss")
             if use_kl_loss is not None:
-                cmd.append(f"actor_rollout_ref.actor.use_kl_loss={str(use_kl_loss).lower()}")
+                cmd.append(
+                    f"actor_rollout_ref.actor.use_kl_loss={str(use_kl_loss).lower()}"
+                )
                 logger.info(f"Job {job.job_id}: ✓ KL use_kl_loss={use_kl_loss}")
 
             kl_loss_coef = kl_config.get("kl_loss_coef")

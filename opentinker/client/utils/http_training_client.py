@@ -644,7 +644,11 @@ class ServiceClient:
             server_cfg = OmegaConf.merge(
                 server_cfg,
                 OmegaConf.create(
-                    {"actor_rollout_ref": {"rollout": {"agent": {"num_workers": agent_num_workers}}}}
+                    {
+                        "actor_rollout_ref": {
+                            "rollout": {"agent": {"num_workers": agent_num_workers}}
+                        }
+                    }
                 ),
             )
             print(
@@ -666,7 +670,9 @@ class ServiceClient:
         if entropy_coeff is not None:
             server_cfg = OmegaConf.merge(
                 server_cfg,
-                OmegaConf.create({"actor_rollout_ref": {"actor": {"entropy_coeff": entropy_coeff}}}),
+                OmegaConf.create(
+                    {"actor_rollout_ref": {"actor": {"entropy_coeff": entropy_coeff}}}
+                ),
             )
             print(f"[ServiceClient] Setting entropy_coeff: {entropy_coeff}")
 
