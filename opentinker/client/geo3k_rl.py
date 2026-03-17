@@ -70,6 +70,7 @@ def main(args):
         project_name=args.project_name,
         experiment_name=args.experiment_name,
         logger_backends=args.logger_backends,
+        config=args,
     )
     client.set_config(args, env)
 

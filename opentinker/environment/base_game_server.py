@@ -383,42 +383,48 @@ def create_game_app(
     @app.post("/reset")
     async def reset(request: ResetRequest):
         """Reset/create a game instance."""
-        instance_id = request.instance_id
-        job_id = request.job_id
-        # Extract extra fields for game reset (exclude instance_id and job_id)
-        reset_kwargs = request.model_dump(exclude={"instance_id", "job_id"})
+        try:
+            instance_id = request.instance_id
+            job_id = request.job_id
+            # Extract extra fields for game reset (exclude instance_id and job_id)
+            reset_kwargs = request.model_dump(exclude={"instance_id", "job_id"})
 
-        with games_lock:
-            # Reuse existing game instance if available (avoids re-initialization)
-            if instance_id in games:
-                game = games[instance_id]
-            else:
-                game = game_class(**game_kwargs)
-                games[instance_id] = game
+            with games_lock:
+                # Reuse existing game instance if available (avoids re-initialization)
+                if instance_id in games:
+                    game = games[instance_id]
+                else:
+                    game = game_class(**game_kwargs)
+                    games[instance_id] = game
 
-        # Reset the game (this is the slow part)
-        observation = game.reset(**reset_kwargs)
+            # Reset the game (this is the slow part)
+            observation = game.reset(**reset_kwargs)
 
-        # Track that this game has started (with job isolation)
-        stats = multi_stats.get_job_stats(job_id)
-        stats.register_game_start(instance_id, job_id)
+            # Track that this game has started (with job isolation)
+            stats = multi_stats.get_job_stats(job_id)
+            stats.register_game_start(instance_id, job_id)
 
-        system_prompt = game.get_system_prompt()
-        initial_message = game.get_initial_user_message()
-        full_observation = (
-            f"{initial_message}\n\n{observation}" if observation else initial_message
-        )
+            system_prompt = game.get_system_prompt()
+            initial_message = game.get_initial_user_message()
+            full_observation = (
+                f"{initial_message}\n\n{observation}" if observation else initial_message
+            )
 
-        response = {
-            "observation": full_observation,
-            "system_prompt": system_prompt,
-        }
+            response = {
+                "observation": full_observation,
+                "system_prompt": system_prompt,
+            }
 
-        state = game.get_state()
-        if state:
-            response["game_state"] = state
+            state = game.get_state()
+            if state:
+                response["game_state"] = state
 
-        return response
+            return response
+        except Exception as e:
+            import traceback
+            error_msg = f"Reset failed for instance {request.instance_id}: {str(e)}\n{traceback.format_exc()}"
+            print(f"[Error] {error_msg}")
+            raise HTTPException(status_code=500, detail=error_msg)
 
     @app.post("/finalize")
     async def finalize(request: ResetRequest):
@@ -433,37 +439,45 @@ def create_game_app(
     @app.post("/step")
     async def step(request: StepRequest):
         """Execute a step in the game."""
-        instance_id = request.instance_id
-        job_id = request.job_id
-        action = request.action
+        try:
+            instance_id = request.instance_id
+            job_id = request.job_id
+            action = request.action
 
-        if instance_id not in games:
-            raise HTTPException(
-                status_code=404,
-                detail=f"Instance {instance_id} not found. Call /reset first.",
+            if instance_id not in games:
+                raise HTTPException(
+                    status_code=404,
+                    detail=f"Instance {instance_id} not found. Call /reset first.",
+                )
+
+            game = games[instance_id]
+            result = game.step(action)
+
+            # Record statistics with instance_id for per-game tracking (with job isolation)
+            stats = multi_stats.get_job_stats(job_id)
+            stats.record_game_result(
+                result.info, result.reward, result.done, instance_id, job_id
             )
 
-        game = games[instance_id]
-        result = game.step(action)
+            # Clean up finished games
+            if result.done:
+                with games_lock:
+                    if instance_id in games:
+                        del games[instance_id]
 
-        # Record statistics with instance_id for per-game tracking (with job isolation)
-        stats = multi_stats.get_job_stats(job_id)
-        stats.record_game_result(
-            result.info, result.reward, result.done, instance_id, job_id
-        )
-
-        # Clean up finished games
-        if result.done:
-            with games_lock:
-                if instance_id in games:
-                    del games[instance_id]
-
-        return {
-            "observation": result.observation,
-            "reward": result.reward,
-            "done": result.done,
-            "info": result.info,
-        }
+            return {
+                "observation": result.observation,
+                "reward": result.reward,
+                "done": result.done,
+                "info": result.info,
+            }
+        except Exception as e:
+            import traceback
+            error_msg = f"Step failed for instance {request.instance_id}: {str(e)}\n{traceback.format_exc()}"
+            print(f"[Error] {error_msg}")
+            if isinstance(e, HTTPException):
+                raise e
+            raise HTTPException(status_code=500, detail=error_msg)
 
     @app.get("/stats")
     async def get_stats(job_id: str = "default"):

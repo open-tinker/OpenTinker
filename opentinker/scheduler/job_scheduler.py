@@ -1035,6 +1035,22 @@ class JobSchedulerActor:
             Popen process object
         """
         env = os.environ.copy()
+
+        # [FIX] Check for broken libcuda.so.1 (size 0) - common issue in some environments
+        libcuda_path = "/usr/lib/x86_64-linux-gnu/libcuda.so.1"
+        if os.path.exists(libcuda_path) and os.path.getsize(libcuda_path) == 0:
+            compat_path = "/usr/local/cuda-12.4/compat"
+            if os.path.isdir(compat_path):
+                current_ld_path = env.get("LD_LIBRARY_PATH", "")
+                env["LD_LIBRARY_PATH"] = (
+                    f"{compat_path}:{current_ld_path}".strip(":")
+                    if current_ld_path
+                    else compat_path
+                )
+                logger.info(
+                    f"Job {job.job_id}: 🛠 Fixed broken libcuda.so.1 by adding {compat_path} to LD_LIBRARY_PATH"
+                )
+
         # Set CUDA_VISIBLE_DEVICES to comma-separated list of GPU IDs
         env["CUDA_VISIBLE_DEVICES"] = ",".join(map(str, job.gpu_ids))
         # Pass job_id to agent loop for per-client trace subdirectory isolation

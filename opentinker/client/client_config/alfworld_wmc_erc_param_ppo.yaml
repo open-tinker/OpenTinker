@@ -9,7 +9,7 @@
 
 # Project settings
 project_name: opentinker
-experiment_name: alfworld_wmc_erc
+experiment_name: alfworld_wmc_erc_ppo
 
 # Logging
 logger_backends: ["console", "wandb"]
@@ -45,8 +45,8 @@ max_prompt_tokens: 2048
 algorithm: "agent_loop"
 
 # Use per-step advantage for multi-turn credit assignment
-adv_estimator: "grpo"
-rollout_n: 8
+adv_estimator: "gae"
+rollout_n: 1
 
 # WMC-ERC: Dynamic Entropy Clipping
 # - mu_base: clipping coefficient for collapsing side (S_* > S_bar)
@@ -90,3 +90,4 @@ scheduler_api_key: null
 
 # GPU settings
 num_gpus: 4
+agent_num_workers: 4

@@ -32,14 +32,33 @@ from opentinker.environment.base_game_server import (
     run_game_server,
 )
 
-from opentinker.environment.inference_pipeline import (
-    InferencePipeline,
-    InferenceResult,
-    RemoteEnvironmentClient,
-    run_inference,
-    load_samples,
-    generate_samples,
-)
+# Lazy import for InferencePipeline to avoid heavy dependencies (like vllm) 
+# when only the game server is needed.
+def __getattr__(name):
+    if name in [
+        "InferencePipeline",
+        "InferenceResult",
+        "RemoteEnvironmentClient",
+        "run_inference",
+        "load_samples",
+        "generate_samples",
+    ]:
+        from opentinker.environment.inference_pipeline import (
+            InferencePipeline,
+            InferenceResult,
+            RemoteEnvironmentClient,
+            run_inference,
+            load_samples,
+            generate_samples,
+        )
+        globals()["InferencePipeline"] = InferencePipeline
+        globals()["InferenceResult"] = InferenceResult
+        globals()["RemoteEnvironmentClient"] = RemoteEnvironmentClient
+        globals()["run_inference"] = run_inference
+        globals()["load_samples"] = load_samples
+        globals()["generate_samples"] = generate_samples
+        return globals()[name]
+    raise AttributeError(f"module {__name__} has no attribute {name}")
 
 __all__ = [
     # Base

@@ -579,6 +579,7 @@ class ServiceClient:
         project_name: Optional[str] = None,
         experiment_name: Optional[str] = None,
         logger_backends: Optional[List[str]] = None,
+        config: Optional[Any] = None,
         **client_kwargs,
     ):
         self.client = HTTPTrainingClient(server_url, **client_kwargs)
@@ -588,11 +589,23 @@ class ServiceClient:
         if logger_backends and project_name and experiment_name:
             from verl.utils.tracking import Tracking
 
+            # Convert DictConfig to dict if necessary for Tracking
+            tracking_config = config
+            if config is not None and not isinstance(config, dict):
+                from omegaconf import OmegaConf
+
+                tracking_config = OmegaConf.to_container(config, resolve=True)
+
+            # Ensure 'trainer' key exists to avoid KeyError in verl.utils.tracking
+            if tracking_config is not None:
+                if "trainer" not in tracking_config:
+                    tracking_config["trainer"] = {}
+
             self.tracker = Tracking(
                 project_name=project_name,
                 experiment_name=experiment_name,
                 default_backend=logger_backends,
-                config=None,  # Can pass config if needed
+                config=tracking_config,
             )
             logger.info(f"Initialized tracking with backends: {logger_backends}")
 
@@ -807,10 +820,11 @@ class ServiceClient:
                     # Update progress bar
                     if verbose and progress_bar:
                         # Show key metrics in progress bar (filter game/ metrics except win_rate)
+                        # Added wmc_erc/mask_ratio to monitor dynamic entropy clipping
                         display_metrics = {
                             k: v
                             for k, v in last_metrics.items()
-                            if not k.startswith("game/") or k == "game/win_rate"
+                            if not k.startswith("game/") or k == "game/win_rate" or k == "wmc_erc/mask_ratio"
                         }
                         metrics_str = ", ".join(
                             [

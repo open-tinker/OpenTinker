@@ -641,6 +641,15 @@ class PPOTrainingServerBackend:
         self.is_initialized = False
         self.global_steps = 0
 
+        # WMC-ERC running statistics (S_bar, Sigma, H_bar)
+        self.wmc_erc_stats = {
+            "s_bar": 0.0,
+            "s_std": 1.0,
+            "h_bar": 1.0,
+            "momentum": 0.9,  # EMA momentum
+            "initialized": False,
+        }
+
         # Generation config (can be overridden by client)
         self.generation_config = {
             "do_sample": True,  # CRITICAL: Enable sampling by default for PPO training
@@ -1174,13 +1183,14 @@ class PPOTrainingServerBackend:
                 )
 
                 batch, wmc_metrics = apply_wmc_erc(
-                    batch, _wmc_erc_entropys, wmc_erc_cfg
+                    batch, _wmc_erc_entropys, wmc_erc_cfg, self.wmc_erc_stats
                 )
                 metrics.update(wmc_metrics)
+                clipping_mode = wmc_erc_cfg.get("clipping_type", "batch")
                 logger.info(
-                    f"[WMC-ERC] mask_ratio={wmc_metrics.get('wmc_erc/mask_ratio', 'N/A'):.3f}, "
-                    f"s_star={wmc_metrics.get('wmc_erc/s_star_mean', 'N/A'):.4f}, "
-                    f"h_wm={wmc_metrics.get('wmc_erc/h_wm_mean', 'N/A'):.4f}"
+                    f"[WMC-ERC] mode={clipping_mode}, mask_ratio={wmc_metrics.get('wmc_erc/mask_ratio', 'N/A'):.3f}, "
+                    f"s_star={wmc_metrics.get('wmc_erc/batch_s_bar', 'N/A'):.4f}, "
+                    f"h_wm={wmc_metrics.get('wmc_erc/batch_h_bar', 'N/A'):.4f}"
                 )
 
             # 10. Update critic
