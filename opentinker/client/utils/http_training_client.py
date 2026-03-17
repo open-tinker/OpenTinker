@@ -644,12 +644,37 @@ class ServiceClient:
             server_cfg = OmegaConf.merge(
                 server_cfg,
                 OmegaConf.create(
-                    {"actor_rollout_ref": {"rollout": {"agent": {"num_workers": agent_num_workers}}}}
+                    {
+                        "actor_rollout_ref": {
+                            "rollout": {"agent": {"num_workers": agent_num_workers}}
+                        }
+                    }
                 ),
             )
             print(
                 f"[ServiceClient] Overriding agent num_workers to: {agent_num_workers}"
             )
+
+        # Pass WMC-ERC config to server if present
+        wmc_erc_cfg = getattr(args, "wmc_erc", None)
+        if wmc_erc_cfg is not None:
+            wmc_erc_dict = OmegaConf.to_container(wmc_erc_cfg, resolve=True)
+            server_cfg = OmegaConf.merge(
+                server_cfg,
+                OmegaConf.create({"wmc_erc": wmc_erc_dict}),
+            )
+            print(f"[ServiceClient] Passing WMC-ERC config to server: {wmc_erc_dict}")
+
+        # Pass entropy_coeff to server actor config if present
+        entropy_coeff = getattr(args, "entropy_coeff", None)
+        if entropy_coeff is not None:
+            server_cfg = OmegaConf.merge(
+                server_cfg,
+                OmegaConf.create(
+                    {"actor_rollout_ref": {"actor": {"entropy_coeff": entropy_coeff}}}
+                ),
+            )
+            print(f"[ServiceClient] Setting entropy_coeff: {entropy_coeff}")
 
         generation_config = {
             "temperature": args.temperature,

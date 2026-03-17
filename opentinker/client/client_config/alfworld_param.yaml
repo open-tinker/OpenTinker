@@ -45,10 +45,10 @@ algorithm: "agent_loop"
 #   - "grpo"          : Standard GRPO (outcome-only advantage)
 #   - "grpo_per_step" : Per-step GRPO with return-based advantages (for multi-turn tasks)
 #   - "gae"           : Generalized Advantage Estimation (for PPO, requires critic)
-adv_estimator: "grpo"
+adv_estimator: "gae"
 # rollout_n: number of samples per prompt for GRPO/grpo_per_step
 # For PPO (gae), rollout_n is typically 1
-rollout_n: 8
+rollout_n: 1
 
 # Interaction configuration
 interaction:
@@ -60,7 +60,7 @@ interaction:
     env_endpoint: http://${interaction.config.env_host}:${interaction.config.env_port}
     # If you run the ALFWorld env server in sharded mode (--shards N),
     # set env_shards=N. The client will route each instance_id to a stable shard.
-    env_shards: 32
+    env_shards: 8
     max_steps: 20 # ALFWorld episodes max steps
     max_total_steps: 20 # Max environment step calls (controls rollout turns)
     observation_template: "{observation}"

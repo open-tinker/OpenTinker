@@ -284,7 +284,7 @@ def check_gpu_available(gpu_id: int) -> bool:
             return True  # Fail open
 
         # Thresholds for considering a GPU "idle"
-        MAX_MEMORY_MB = 10  # Allow up to 100 MB (some baseline CUDA overhead)
+        MAX_MEMORY_MB = 1000  # Allow up to 1000 MB (some overhead from Ray/CUDA init)
         MAX_UTILIZATION = 1000  # Allow up to 5% utilization
 
         if memory_used_mb > MAX_MEMORY_MB or utilization_percent > MAX_UTILIZATION:
@@ -294,35 +294,9 @@ def check_gpu_available(gpu_id: int) -> bool:
             )
             return False
 
-        # Check 2: Look for running processes on this GPU
-        pmon_result = subprocess.run(
-            ["nvidia-smi", "pmon", "-c", "1", "-s", "um"],
-            capture_output=True,
-            text=True,
-            timeout=5,
-        )
-
-        if pmon_result.returncode == 0:
-            # Parse pmon output to check for processes on this GPU
-            # Format: "# gpu   pid  type   sm  mem   enc   dec   command"
-            #         "  0   12345   C    50   500     0     0   python"
-            lines = pmon_result.stdout.strip().split("\n")
-            for line in lines:
-                if line.startswith("#") or not line.strip():
-                    continue
-                parts = line.split()
-                if len(parts) >= 2:
-                    try:
-                        gpu_idx = int(parts[0].strip())
-                        if gpu_idx == gpu_id and parts[1].strip() != "-":
-                            # Found a process on this GPU
-                            pid = parts[1].strip()
-                            logger.warning(
-                                f"GPU {gpu_id}: ⚠️ OCCUPIED - Process {pid} detected via pmon"
-                            )
-                            return False
-                    except (ValueError, IndexError):
-                        continue
+        # Check 2: pmon process check - SKIPPED to allow GPU sharing for small models
+        # When using small models (e.g. 0.5B), GPU sharing is safe as long as
+        # total memory fits. The memory threshold above handles this.
 
         # All checks passed - GPU is idle
         logger.debug(
@@ -1085,12 +1059,18 @@ class JobSchedulerActor:
         if kl_config:
             use_kl_in_reward = kl_config.get("use_kl_in_reward")
             if use_kl_in_reward is not None:
-                cmd.append(f"algorithm.use_kl_in_reward={str(use_kl_in_reward).lower()}")
-                logger.info(f"Job {job.job_id}: ✓ KL use_kl_in_reward={use_kl_in_reward}")
+                cmd.append(
+                    f"algorithm.use_kl_in_reward={str(use_kl_in_reward).lower()}"
+                )
+                logger.info(
+                    f"Job {job.job_id}: ✓ KL use_kl_in_reward={use_kl_in_reward}"
+                )
 
             use_kl_loss = kl_config.get("use_kl_loss")
             if use_kl_loss is not None:
-                cmd.append(f"actor_rollout_ref.actor.use_kl_loss={str(use_kl_loss).lower()}")
+                cmd.append(
+                    f"actor_rollout_ref.actor.use_kl_loss={str(use_kl_loss).lower()}"
+                )
                 logger.info(f"Job {job.job_id}: ✓ KL use_kl_loss={use_kl_loss}")
 
             kl_loss_coef = kl_config.get("kl_loss_coef")
