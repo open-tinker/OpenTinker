@@ -625,6 +625,19 @@ class ServiceClient:
             }
         )
 
+        # Optional world model SFT coefficient for joint PPO + WM training.
+        world_model_coeff = args.get("world_model_coeff", None)
+        if world_model_coeff is not None:
+            server_cfg = OmegaConf.merge(
+                server_cfg,
+                OmegaConf.create(
+                    {"algorithm": {"world_model_coeff": float(world_model_coeff)}}
+                ),
+            )
+            print(
+                f"[ServiceClient] Forwarding algorithm.world_model_coeff={world_model_coeff}"
+            )
+
         # Add multi_turn config if present in args
         if hasattr(args, "multi_turn") and args.multi_turn:
             multi_turn_cfg = OmegaConf.to_container(args.multi_turn, resolve=True)
