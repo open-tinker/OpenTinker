@@ -84,6 +84,7 @@ from opentinker.backend_patch.verl.trainer.ppo.reward import (
 )
 
 
+
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -639,6 +640,7 @@ class PPOTrainingServerBackend:
         # Server state
         self.is_initialized = False
         self.global_steps = 0
+        self.wm_coeff = 0.0
 
         # Generation config (can be overridden by client)
         self.generation_config = {
@@ -677,6 +679,15 @@ class PPOTrainingServerBackend:
         try:
             # optimizer needs parameter: total_steps
             self.trainer.post_init(total_steps)
+
+            # Forward algorithm.world_model_coeff → actor config so dp_actor can read it
+            algo_wm_coeff = self.config.algorithm.get("world_model_coeff", 0.0)
+            if algo_wm_coeff > 0:
+                from omegaconf import open_dict
+                with open_dict(self.config):
+                    self.config.actor_rollout_ref.actor.world_model_coeff = algo_wm_coeff
+                logger.info(f"Forwarded world_model_coeff={algo_wm_coeff} to actor config")
+
             logger.info("Initializing workers...")
 
             # Check async rollout mode
@@ -706,6 +717,11 @@ class PPOTrainingServerBackend:
 
             if self.async_rollout_mode:
                 self.async_rollout_manager = self.trainer.async_rollout_manager
+
+            # World model SFT loss coeff (actual loss computed in dp_actor via config.world_model_coeff)
+            self.wm_coeff = self.config.actor_rollout_ref.actor.get("world_model_coeff", 0.0)
+            if self.wm_coeff > 0:
+                logger.info(f"World model SFT loss enabled with coeff={self.wm_coeff}")
 
             self.is_initialized = True
             logger.info("Workers initialized successfully")
@@ -1169,6 +1185,14 @@ class PPOTrainingServerBackend:
                         critic_output.meta_info["metrics"]
                     )
                     metrics.update(critic_output_metrics)
+
+            # 10.5 Compute observation_mask for world model loss
+            if self.wm_coeff > 0:
+                resp_len = batch.batch["response_mask"].shape[1]
+                attn_response = batch.batch["attention_mask"][:, -resp_len:]
+                batch.batch["observation_mask"] = (
+                    attn_response.bool() & ~batch.batch["response_mask"].bool()
+                ).float()
 
             # 11. Update actor (check critic warmup)
             if self.config.trainer.critic_warmup <= self.global_steps:
@@ -2104,8 +2128,16 @@ def launch_server(
             )
             ray.init(
                 namespace=_server_cfg.ray.namespace,
-                num_gpus=_server_cfg.trainer.n_gpus_per_node,  # Explicitly specify number of GPUs
+                num_gpus=_server_cfg.trainer.n_gpus_per_node,
                 ignore_reinit_error=True,
+                runtime_env={
+                    "env_vars": {
+                        "NCCL_CUMEM_ENABLE": "0",
+                        "VLLM_DISABLE_SLEEP_MODE": "1",
+                        "RAY_memory_usage_threshold": "0.99",
+                        "VLLM_GPU_MEMORY_UTILIZATION": "0.15",
+                    },
+                },
             )
         else:
             # Connect to existing Ray cluster at specific address
@@ -2114,6 +2146,14 @@ def launch_server(
                 address=_server_cfg.ray.address,
                 namespace=_server_cfg.ray.namespace,
                 ignore_reinit_error=True,
+                runtime_env={
+                    "env_vars": {
+                        "NCCL_CUMEM_ENABLE": "0",
+                        "VLLM_DISABLE_SLEEP_MODE": "1",
+                        "RAY_memory_usage_threshold": "0.99",
+                        "VLLM_GPU_MEMORY_UTILIZATION": "0.15",
+                    },
+                },
             )
 
         # Verify GPU availability
