@@ -284,7 +284,7 @@ def check_gpu_available(gpu_id: int) -> bool:
             return True  # Fail open
 
         # Thresholds for considering a GPU "idle"
-        MAX_MEMORY_MB = 10  # Allow up to 100 MB (some baseline CUDA overhead)
+        MAX_MEMORY_MB = 2000  # Allow up to 2 GB (root processes may use ~1 GB)
         MAX_UTILIZATION = 1000  # Allow up to 5% utilization
 
         if memory_used_mb > MAX_MEMORY_MB or utilization_percent > MAX_UTILIZATION:
@@ -294,35 +294,8 @@ def check_gpu_available(gpu_id: int) -> bool:
             )
             return False
 
-        # Check 2: Look for running processes on this GPU
-        pmon_result = subprocess.run(
-            ["nvidia-smi", "pmon", "-c", "1", "-s", "um"],
-            capture_output=True,
-            text=True,
-            timeout=5,
-        )
-
-        if pmon_result.returncode == 0:
-            # Parse pmon output to check for processes on this GPU
-            # Format: "# gpu   pid  type   sm  mem   enc   dec   command"
-            #         "  0   12345   C    50   500     0     0   python"
-            lines = pmon_result.stdout.strip().split("\n")
-            for line in lines:
-                if line.startswith("#") or not line.strip():
-                    continue
-                parts = line.split()
-                if len(parts) >= 2:
-                    try:
-                        gpu_idx = int(parts[0].strip())
-                        if gpu_idx == gpu_id and parts[1].strip() != "-":
-                            # Found a process on this GPU
-                            pid = parts[1].strip()
-                            logger.warning(
-                                f"GPU {gpu_id}: ⚠️ OCCUPIED - Process {pid} detected via pmon"
-                            )
-                            return False
-                    except (ValueError, IndexError):
-                        continue
+        # pmon check disabled — root/system processes cause false positives
+        # when sharing GPUs across users. Memory threshold check above is sufficient.
 
         # All checks passed - GPU is idle
         logger.debug(

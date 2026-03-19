@@ -157,29 +157,33 @@ def compute_dynamic_mask(
     h_wm_per_sample: List[List[torch.Tensor]],
     mu_base: float,
     mu_exp: float,
+    eta_wm: float,
     lambda_wm: float,
     s_bar: float,
     sigma: float,
-    h_bar: float,
+    clipping_method: str = "mask",
 ) -> List[List[float]]:
-    """Compute per-turn dynamic entropy clipping mask.
+    """Compute per-turn dynamic entropy clipping mask or coefficient.
 
     Logic:
-    - Normalization: H_WM is normalized by h_bar (batch or global).
-    - Threshold: threshold = mu * (1 + lambda * H_WM_norm) * sigma
+    - WM uncertainty signal: f(H_WM) = eta_wm * exp(-lambda_wm * H_WM)
+    - Threshold: threshold = mu * f(H_WM) * sigma
+    - Masking: m_t = 0.0 if violation, 1.0 otherwise
+    - Clipping: m_t = threshold / deviation if violation, 1.0 otherwise (PPO-style)
 
     Args:
         s_star_per_sample: per-sample, per-turn S_* tensors
         h_wm_per_sample: per-sample, per-turn H_WM tensors
         mu_base: clipping coefficient for collapsing side
         mu_exp: clipping coefficient for exploration side
-        lambda_wm: WM uncertainty weight
+        eta_wm: base multiplier for WM uncertainty signal
+        lambda_wm: exponential decay factor for WM uncertainty
         s_bar: mean of S_* (batch or global)
         sigma: std of S_* (batch or global)
-        h_bar: mean of H_WM (batch or global)
+        clipping_method: "mask" or "clip"
 
     Returns:
-        List of lists of floats (0.0 or 1.0), one mask per turn per sample.
+        List of lists of floats, one mask/coeff per turn per sample.
     """
     mask_per_sample = []
     for i in range(len(s_star_per_sample)):
@@ -188,18 +192,28 @@ def compute_dynamic_mask(
             s_t = s_star_per_sample[i][t].detach().item()
             h_t = h_wm_per_sample[i][t].detach().item()
             
-            # Normalize H_WM
-            h_t_norm = h_t / (h_bar + 1e-8)
+            # WM uncertainty signal: f(H_WM) = eta_wm * exp(-lambda_wm * H_WM)
+            h_factor = eta_wm * np.exp(-lambda_wm * h_t)
             
             # Asymmetric threshold calculation
             if s_t > s_bar:
                 # Collapsing side
-                threshold = mu_base * (1.0 + lambda_wm * h_t_norm) * sigma
-                m_t = 1.0 if (s_t - s_bar) <= threshold else 0.0
+                threshold = mu_base * h_factor * sigma
+                diff = s_t - s_bar
+                if clipping_method == "mask":
+                    m_t = 1.0 if diff <= threshold else 0.0
+                else: # PPO-style clipping
+                    # If diff > threshold, we scale the advantage by threshold/diff
+                    # such that the effective update is capped at threshold
+                    m_t = min(1.0, threshold / (diff + 1e-8))
             else:
                 # Exploration side
-                threshold = mu_exp * (1.0 + lambda_wm * h_t_norm) * sigma
-                m_t = 1.0 if (s_bar - s_t) <= threshold else 0.0
+                threshold = mu_exp * h_factor * sigma
+                diff = s_bar - s_t
+                if clipping_method == "mask":
+                    m_t = 1.0 if diff <= threshold else 0.0
+                else: # PPO-style clipping
+                    m_t = min(1.0, threshold / (diff + 1e-8))
                 
             masks.append(m_t)
         mask_per_sample.append(masks)
@@ -229,6 +243,7 @@ def apply_wmc_erc(
         return batch, {}
 
     clipping_type = wmc_erc_config.get("clipping_type", "batch") if hasattr(wmc_erc_config, 'get') else getattr(wmc_erc_config, 'clipping_type', "batch")
+    clipping_method = wmc_erc_config.get("clipping_method", "mask") if hasattr(wmc_erc_config, 'get') else getattr(wmc_erc_config, 'clipping_method', "mask")
 
     response_mask = batch.batch["response_mask"]
     old_log_probs = batch.batch["old_log_probs"]
@@ -277,19 +292,20 @@ def apply_wmc_erc(
         use_s_std = batch_s_std
         use_h_bar = batch_h_bar
 
-    # 4. Dynamic mask
+    # 4. Dynamic mask/clip
     mu_base = float(wmc_erc_config.get("mu_base", 1.0) if hasattr(wmc_erc_config, 'get') else getattr(wmc_erc_config, 'mu_base', 1.0))
     mu_exp = float(wmc_erc_config.get("mu_exp", 2.0) if hasattr(wmc_erc_config, 'get') else getattr(wmc_erc_config, 'mu_exp', 2.0))
+    eta_wm = float(wmc_erc_config.get("eta_wm", 1.0) if hasattr(wmc_erc_config, 'get') else getattr(wmc_erc_config, 'eta_wm', 1.0))
     lambda_wm = float(wmc_erc_config.get("lambda_wm", 1.0) if hasattr(wmc_erc_config, 'get') else getattr(wmc_erc_config, 'lambda_wm', 1.0))
     
     mask = compute_dynamic_mask(
-        s_star, h_wm, mu_base, mu_exp, lambda_wm,
+        s_star, h_wm, mu_base, mu_exp, eta_wm, lambda_wm,
         s_bar=use_s_bar,
         sigma=use_s_std,
-        h_bar=use_h_bar
+        clipping_method=clipping_method
     )
 
-    # 5. Apply mask to advantages
+    # 5. Apply mask/coeff to advantages
     batch_size = advantages.shape[0]
     for i in range(batch_size):
         for t, (start, end) in enumerate(turn_boundaries[i]):
@@ -300,15 +316,15 @@ def apply_wmc_erc(
     # 6. Metrics
     all_m = [m for turns in mask for m in turns]
     
-    num_collapsing_masked = 0
-    num_exploration_masked = 0
+    num_collapsing_violated = 0
+    num_exploration_violated = 0
     for i in range(len(s_star)):
         for t in range(len(s_star[i])):
-            if mask[i][t] == 0.0:
+            if mask[i][t] < 1.0:
                 if s_star[i][t].item() > use_s_bar:
-                    num_collapsing_masked += 1
+                    num_collapsing_violated += 1
                 else:
-                    num_exploration_masked += 1
+                    num_exploration_violated += 1
 
     env_mask = attention_mask_response * (1.0 - response_mask)
     env_count = env_mask.sum()
@@ -322,9 +338,9 @@ def apply_wmc_erc(
         "wmc_erc/running_s_std": float(running_stats["s_std"]),
         "wmc_erc/running_h_bar": float(running_stats["h_bar"]),
         "wmc_erc/mask_ratio": float(np.mean(all_m)) if all_m else 1.0,
-        "wmc_erc/num_masked_turns": sum(1 for m in all_m if m == 0.0),
-        "wmc_erc/num_collapsing_masked": num_collapsing_masked,
-        "wmc_erc/num_exploration_masked": num_exploration_masked,
+        "wmc_erc/num_violated_turns": sum(1 for m in all_m if m < 1.0),
+        "wmc_erc/num_collapsing_violated": num_collapsing_violated,
+        "wmc_erc/num_exploration_violated": num_exploration_violated,
         "wmc_erc/total_turns": len(all_m),
         "wmc_erc/wm_nll": wm_nll,
     }

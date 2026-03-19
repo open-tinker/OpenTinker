@@ -27,7 +27,6 @@ Key Features:
 
 import asyncio
 import base64
-import gc
 import logging
 import signal
 import sys
@@ -83,6 +82,7 @@ from opentinker.backend_patch.verl.trainer.ppo.reward import (
     compute_reward_async,
     load_reward_manager,
 )
+
 
 
 # Configure logging
@@ -640,15 +640,7 @@ class PPOTrainingServerBackend:
         # Server state
         self.is_initialized = False
         self.global_steps = 0
-
-        # WMC-ERC running statistics (S_bar, Sigma, H_bar)
-        self.wmc_erc_stats = {
-            "s_bar": 0.0,
-            "s_std": 1.0,
-            "h_bar": 1.0,
-            "momentum": 0.9,  # EMA momentum
-            "initialized": False,
-        }
+        self.wm_coeff = 0.0
 
         # Generation config (can be overridden by client)
         self.generation_config = {
@@ -687,6 +679,15 @@ class PPOTrainingServerBackend:
         try:
             # optimizer needs parameter: total_steps
             self.trainer.post_init(total_steps)
+
+            # Forward algorithm.world_model_coeff → actor config so dp_actor can read it
+            algo_wm_coeff = self.config.algorithm.get("world_model_coeff", 0.0)
+            if algo_wm_coeff > 0:
+                from omegaconf import open_dict
+                with open_dict(self.config):
+                    self.config.actor_rollout_ref.actor.world_model_coeff = algo_wm_coeff
+                logger.info(f"Forwarded world_model_coeff={algo_wm_coeff} to actor config")
+
             logger.info("Initializing workers...")
 
             # Check async rollout mode
@@ -716,6 +717,11 @@ class PPOTrainingServerBackend:
 
             if self.async_rollout_mode:
                 self.async_rollout_manager = self.trainer.async_rollout_manager
+
+            # World model SFT loss coeff (actual loss computed in dp_actor via config.world_model_coeff)
+            self.wm_coeff = self.config.actor_rollout_ref.actor.get("world_model_coeff", 0.0)
+            if self.wm_coeff > 0:
+                logger.info(f"World model SFT loss enabled with coeff={self.wm_coeff}")
 
             self.is_initialized = True
             logger.info("Workers initialized successfully")
@@ -953,9 +959,7 @@ class PPOTrainingServerBackend:
             # episodes into individual per-turn training samples, the gen_batch_output
             # batch size is larger than the original batch. We need to expand the
             # original batch to match using the expansion index.
-            expansion_index = gen_batch_output.meta_info.pop(
-                "per_turn_expansion_index", None
-            )
+            expansion_index = gen_batch_output.meta_info.pop('per_turn_expansion_index', None)
             if expansion_index is not None:
                 logger.info(
                     f"[Per-turn training] Expanding original batch from {len(batch)} to "
@@ -968,7 +972,6 @@ class PPOTrainingServerBackend:
                 elif batch.batch is not None:
                     # Empty TensorDict (all keys were popped) — create new one with expanded size
                     from tensordict import TensorDict
-
                     batch.batch = TensorDict({}, batch_size=[len(expansion_index)])
                 # Expand non-tensor batch
                 expanded_non_tensor = {}
@@ -1093,7 +1096,6 @@ class PPOTrainingServerBackend:
                 # ===== DEBUG LOGGING END =====
 
                 metrics.update(old_log_prob_metrics)
-                _wmc_erc_entropys = entropys  # Preserve for WMC-ERC before pop
                 old_log_prob.batch.pop("entropys")
                 batch = batch.union(old_log_prob)
                 logger.info(
@@ -1175,24 +1177,6 @@ class PPOTrainingServerBackend:
                     config=self.config.algorithm,
                 )
 
-            # 9.5 WMC-ERC: Dynamic entropy clipping
-            wmc_erc_cfg = OmegaConf.select(self.config, "wmc_erc", default=None)
-            if wmc_erc_cfg and wmc_erc_cfg.get("enable", False):
-                from opentinker.backend_patch.verl.trainer.ppo.wmc_erc import (
-                    apply_wmc_erc,
-                )
-
-                batch, wmc_metrics = apply_wmc_erc(
-                    batch, _wmc_erc_entropys, wmc_erc_cfg, self.wmc_erc_stats
-                )
-                metrics.update(wmc_metrics)
-                clipping_mode = wmc_erc_cfg.get("clipping_type", "batch")
-                logger.info(
-                    f"[WMC-ERC] mode={clipping_mode}, mask_ratio={wmc_metrics.get('wmc_erc/mask_ratio', 'N/A'):.3f}, "
-                    f"s_star={wmc_metrics.get('wmc_erc/batch_s_bar', 'N/A'):.4f}, "
-                    f"h_wm={wmc_metrics.get('wmc_erc/batch_h_bar', 'N/A'):.4f}"
-                )
-
             # 10. Update critic
             if self.use_critic:
                 with marked_timer("update_critic", timing_raw, color="pink"):
@@ -1201,6 +1185,14 @@ class PPOTrainingServerBackend:
                         critic_output.meta_info["metrics"]
                     )
                     metrics.update(critic_output_metrics)
+
+            # 10.5 Compute observation_mask for world model loss
+            if self.wm_coeff > 0:
+                resp_len = batch.batch["response_mask"].shape[1]
+                attn_response = batch.batch["attention_mask"][:, -resp_len:]
+                batch.batch["observation_mask"] = (
+                    attn_response.bool() & ~batch.batch["response_mask"].bool()
+                ).float()
 
             # 11. Update actor (check critic warmup)
             if self.config.trainer.critic_warmup <= self.global_steps:
@@ -1289,13 +1281,6 @@ class PPOTrainingServerBackend:
                         continue
 
             logger.info(f"Training step {self.global_steps} completed successfully")
-
-            # Free large intermediates and force garbage collection to prevent OOM
-            del batch, gen_batch, gen_batch_output, reward_tensor
-            if "_wmc_erc_entropys" in dir():
-                del _wmc_erc_entropys
-            gc.collect()
-            torch.cuda.empty_cache()
 
             return {
                 "status": "success",
@@ -1574,9 +1559,7 @@ class PPOTrainingServerBackend:
 
             # 6. Merge original batch and generated output
             # Per-turn training expansion: expand batch if gen output is larger
-            expansion_index = gen_batch_output.meta_info.pop(
-                "per_turn_expansion_index", None
-            )
+            expansion_index = gen_batch_output.meta_info.pop('per_turn_expansion_index', None)
             if expansion_index is not None:
                 logger.info(
                     f"[Per-turn training] Validation: Expanding original batch from {len(batch)} to "
@@ -1588,7 +1571,6 @@ class PPOTrainingServerBackend:
                 elif batch.batch is not None:
                     # Empty TensorDict (all keys were popped) — create new one with expanded size
                     from tensordict import TensorDict
-
                     batch.batch = TensorDict({}, batch_size=[len(expansion_index)])
                 expanded_non_tensor = {}
                 for k, v in batch.non_tensor_batch.items():
@@ -2146,13 +2128,14 @@ def launch_server(
             )
             ray.init(
                 namespace=_server_cfg.ray.namespace,
-                num_gpus=_server_cfg.trainer.n_gpus_per_node,  # Explicitly specify number of GPUs
+                num_gpus=_server_cfg.trainer.n_gpus_per_node,
                 ignore_reinit_error=True,
                 runtime_env={
                     "env_vars": {
                         "NCCL_CUMEM_ENABLE": "0",
                         "VLLM_DISABLE_SLEEP_MODE": "1",
                         "RAY_memory_usage_threshold": "0.99",
+                        "VLLM_GPU_MEMORY_UTILIZATION": "0.15",
                     },
                 },
             )
@@ -2168,6 +2151,7 @@ def launch_server(
                         "NCCL_CUMEM_ENABLE": "0",
                         "VLLM_DISABLE_SLEEP_MODE": "1",
                         "RAY_memory_usage_threshold": "0.99",
+                        "VLLM_GPU_MEMORY_UTILIZATION": "0.15",
                     },
                 },
             )

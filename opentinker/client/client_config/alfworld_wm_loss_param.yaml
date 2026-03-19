@@ -1,0 +1,86 @@
+# ALFWorld Training Configuration
+# Use with: python alfworld_rl.py
+
+# Project settings
+project_name: opentinker
+experiment_name: alfworld_wm_loss_only_0.0001
+
+# Logging
+logger_backends: ["console", "wandb"]
+
+# Tracing (optional)
+enable_tracing: true
+weave_project: null
+
+# WandB (optional)
+wandb_key: 2ed6f8544ac3e30d5c08879166cc10d9c6232448
+
+# Model and tokenizer
+tokenizer_path: null
+
+# Training parameters
+batch_size: 8
+num_workers: 4
+# Training duration - set ONE of these (num_steps takes precedence if both set)
+num_epochs: null # Number of epochs (null = use num_steps)
+num_steps: 1000 # Total training steps (null = use num_epochs)
+save_freq: 200
+test_freq: 50 # Validation frequency (every N steps)
+
+# Validation parameters
+val_batch_size: 50 # Total validation samples (null = 50)
+
+# Model parameters
+# Generation parameters
+temperature: 1 # Lower temperature for more focused responses
+top_p: 1
+max_new_tokens: 4096 # TOTAL response budget for entire multi-turn trajectory (NOT per-turn!)
+max_prompt_tokens: 2048
+
+# Algorithm (must be agent_loop for multi-turn)
+algorithm: "agent_loop"
+
+# RL Algorithm settings (passed to server via scheduler)
+# adv_estimator options:
+#   - "grpo"          : Standard GRPO (outcome-only advantage)
+#   - "grpo_per_step" : Per-step GRPO with return-based advantages (for multi-turn tasks)
+#   - "gae"           : Generalized Advantage Estimation (for PPO, requires critic)
+adv_estimator: "grpo"
+# rollout_n: number of samples per prompt for GRPO/grpo_per_step
+# For PPO (gae), rollout_n is typically 1
+rollout_n: 8
+
+# World model SFT loss: predict environment observation tokens as auxiliary task
+world_model_coeff: 0.0001
+
+# Interaction configuration
+interaction:
+  name: alfworld
+  class_path: opentinker.environment.gym_environment_interaction.GymEnvironmentInteraction
+  config:
+    env_host: 0.0.0.0
+    env_port: 8092
+    env_endpoint: http://${interaction.config.env_host}:${interaction.config.env_port}
+    # If you run the ALFWorld env server in sharded mode (--shards N),
+    # set env_shards=N. The client will route each instance_id to a stable shard.
+    env_shards: 8
+    max_steps: 20 # ALFWorld episodes max steps
+    max_total_steps: 20 # Max environment step calls (controls rollout turns)
+    observation_template: "{observation}"
+    # ALFWorld specific settings
+    split: train # train, eval_in_distribution, eval_out_of_distribution
+
+multi_turn:
+  max_user_turns: ${interaction.config.max_total_steps}
+  max_assistant_turns: ${interaction.config.max_total_steps}
+  max_tokens_per_turn: 512 # Per-turn response limit (optional, null for no limit)
+  # Weave tracing (optional - runs on SERVER side)
+  weave_project: "zsqzz/alfworld-env-test"
+  experiment_name: "wm_loss_only"
+
+# Scheduler settings
+scheduler_url: "http://0.0.0.0:8780"
+scheduler_api_key: otk_98b8db24ccd64c92e1fdd9a232e209fa
+
+# GPU settings
+num_gpus: 4

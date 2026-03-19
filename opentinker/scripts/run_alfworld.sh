@@ -25,6 +25,7 @@ MODEL_PATH="/inspire/hdd/project/robot-reasoning/xuyue-p-xuyue/ziyu/.cache/huggi
 # OpenTinker root (relative to this script: opentinker/scripts/run_alfworld.sh)
 OPENTINKER_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 
+export NCCL_CUMEM_ENABLE=0
 export VLLM_DISABLE_SLEEP_MODE=1
 export HF_HUB_OFFLINE=1
 export WANDB_MODE=offline

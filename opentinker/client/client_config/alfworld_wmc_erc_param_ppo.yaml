@@ -51,7 +51,8 @@ rollout_n: 1
 # WMC-ERC: Dynamic Entropy Clipping
 # - mu_base: clipping coefficient for collapsing side (S_* > S_bar)
 # - mu_exp: clipping coefficient for exploration side (S_* < S_bar, usually > mu_base)
-# - lambda_wm: how much WM uncertainty (normalized) widens the gate
+# - eta_wm: base multiplier for WM uncertainty signal
+# - lambda_wm: exponential decay factor for WM uncertainty (higher H_WM -> smaller gate)
 # - clipping_type: "batch" or "global" (global uses running statistics)
 # - momentum: momentum for running statistics (only used if clipping_type is "global")
 # - enable: master switch
@@ -59,6 +60,7 @@ wmc_erc:
   enable: true
   mu_base: 1.0
   mu_exp: 2.0
+  eta_wm: 1.0
   lambda_wm: 1.0
   clipping_type: "global"
   momentum: 0.9
@@ -82,7 +84,7 @@ multi_turn:
   max_assistant_turns: ${interaction.config.max_total_steps}
   max_tokens_per_turn: 512
   weave_project: null
-  experiment_name: "alfworld_wmc_erc"
+  experiment_name: "alfworld_wmc_erc_ppo"
 
 # Scheduler settings
 scheduler_url: "http://0.0.0.0:8780"

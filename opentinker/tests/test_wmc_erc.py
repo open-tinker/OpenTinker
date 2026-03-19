@@ -62,14 +62,14 @@ class TestWmcErc(unittest.TestCase):
         h_bar = 1.0
         
         # 1. mu_base=0.1 (block high), mu_exp=10.0 (allow low)
-        mask = compute_dynamic_mask(s_star, h_wm, mu_base=0.1, mu_exp=10.0, lambda_wm=0.0,
-                                   s_bar=s_bar, sigma=sigma, h_bar=h_bar)
+        mask = compute_dynamic_mask(s_star, h_wm, mu_base=0.1, mu_exp=10.0, eta_wm=1.0, lambda_wm=0.0,
+                                   s_bar=s_bar, sigma=sigma)
         self.assertEqual(mask[0], [0.0]) # High blocked
         self.assertEqual(mask[1], [1.0]) # Low allowed
         
         # 2. mu_base=10.0 (allow high), mu_exp=0.1 (block low)
-        mask = compute_dynamic_mask(s_star, h_wm, mu_base=10.0, mu_exp=0.1, lambda_wm=0.0,
-                                   s_bar=s_bar, sigma=sigma, h_bar=h_bar)
+        mask = compute_dynamic_mask(s_star, h_wm, mu_base=10.0, mu_exp=0.1, eta_wm=1.0, lambda_wm=0.0,
+                                   s_bar=s_bar, sigma=sigma)
         self.assertEqual(mask[0], [1.0]) # High allowed
         self.assertEqual(mask[1], [0.0]) # Low blocked
 
@@ -122,6 +122,28 @@ class TestWmcErc(unittest.TestCase):
         
         # Should be blocked because mu_exp=0.1 is very tight relative to global s_bar
         self.assertTrue((batch.batch["advantages"] == 0).all())
+
+    def test_clipping_method_clip(self):
+        """Verify that 'clip' method scales advantages instead of zeroing them."""
+        # Setup data such that we have a violation
+        # S* = 15.0, s_bar = 10.0, sigma = 1.0, mu_base = 1.0, h_factor = 1.0
+        # diff = 5.0, threshold = 1.0
+        # m_t should be 1.0 / 5.0 = 0.2
+        
+        s_star = [[torch.tensor(15.0)]]
+        h_wm = [[torch.tensor(0.0)]] # lambda_wm=0, eta_wm=1 -> h_factor=1
+        s_bar = 10.0
+        sigma = 1.0
+        
+        # 1. Test clip
+        mask = compute_dynamic_mask(s_star, h_wm, mu_base=1.0, mu_exp=1.0, eta_wm=1.0, lambda_wm=0.0,
+                                   s_bar=s_bar, sigma=sigma, clipping_method="clip")
+        self.assertAlmostEqual(mask[0][0], 0.2, places=5)
+        
+        # 2. Test mask (for comparison)
+        mask = compute_dynamic_mask(s_star, h_wm, mu_base=1.0, mu_exp=1.0, eta_wm=1.0, lambda_wm=0.0,
+                                   s_bar=s_bar, sigma=sigma, clipping_method="mask")
+        self.assertEqual(mask[0][0], 0.0)
 
 
 if __name__ == "__main__":

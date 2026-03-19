@@ -9,7 +9,7 @@
 
 # Project settings
 project_name: opentinker
-experiment_name: alfworld_wmc_erc_part_mask
+experiment_name: alfworld_wmc_erc_wm_loss_0.0001
 
 # Logging
 logger_backends: ["console", "wandb"]
@@ -48,13 +48,15 @@ algorithm: "agent_loop"
 adv_estimator: "grpo"
 rollout_n: 8
 
+# World model SFT loss: predict environment observation tokens as auxiliary task
+world_model_coeff: 0.0001
+
 # WMC-ERC: Dynamic Entropy Clipping
 # - mu_base: clipping coefficient for collapsing side (S_* > S_bar)
 # - mu_exp: clipping coefficient for exploration side (S_* < S_bar, usually > mu_base)
 # - eta_wm: base multiplier for WM uncertainty signal
 # - lambda_wm: exponential decay factor for WM uncertainty (higher H_WM -> smaller gate)
 # - clipping_type: "batch" or "global" (global uses running statistics)
-# - clipping_method: "mask" (0/1 gating) or "clip" (PPO-style soft clipping)
 # - momentum: momentum for running statistics (only used if clipping_type is "global")
 # - enable: master switch
 wmc_erc:
@@ -64,7 +66,6 @@ wmc_erc:
   eta_wm: 3.0
   lambda_wm: 1.0
   clipping_type: "global"
-  clipping_method: "mask"
   momentum: 0.9
 
 # Interaction configuration
@@ -86,7 +87,7 @@ multi_turn:
   max_assistant_turns: ${interaction.config.max_total_steps}
   max_tokens_per_turn: 512
   weave_project: null
-  experiment_name: "alfworld_wmc_erc"
+  experiment_name: "alfworld_wmc_erc_wm_loss"
 
 # Scheduler settings
 scheduler_url: "http://0.0.0.0:8780"
