@@ -84,7 +84,6 @@ from opentinker.backend_patch.verl.trainer.ppo.reward import (
 )
 
 
-
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -684,9 +683,25 @@ class PPOTrainingServerBackend:
             algo_wm_coeff = self.config.algorithm.get("world_model_coeff", 0.0)
             if algo_wm_coeff > 0:
                 from omegaconf import open_dict
+
                 with open_dict(self.config):
-                    self.config.actor_rollout_ref.actor.world_model_coeff = algo_wm_coeff
-                logger.info(f"Forwarded world_model_coeff={algo_wm_coeff} to actor config")
+                    self.config.actor_rollout_ref.actor.world_model_coeff = (
+                        algo_wm_coeff
+                    )
+                    # Also forward wm_loss_top_ratio if set
+                    algo_wm_top_ratio = self.config.algorithm.get(
+                        "wm_loss_top_ratio", None
+                    )
+                    if algo_wm_top_ratio is not None:
+                        self.config.actor_rollout_ref.actor.wm_loss_top_ratio = float(
+                            algo_wm_top_ratio
+                        )
+                        logger.info(
+                            f"Forwarded wm_loss_top_ratio={algo_wm_top_ratio} to actor config"
+                        )
+                logger.info(
+                    f"Forwarded world_model_coeff={algo_wm_coeff} to actor config"
+                )
 
             logger.info("Initializing workers...")
 
@@ -719,7 +734,9 @@ class PPOTrainingServerBackend:
                 self.async_rollout_manager = self.trainer.async_rollout_manager
 
             # World model SFT loss coeff (actual loss computed in dp_actor via config.world_model_coeff)
-            self.wm_coeff = self.config.actor_rollout_ref.actor.get("world_model_coeff", 0.0)
+            self.wm_coeff = self.config.actor_rollout_ref.actor.get(
+                "world_model_coeff", 0.0
+            )
             if self.wm_coeff > 0:
                 logger.info(f"World model SFT loss enabled with coeff={self.wm_coeff}")
 
@@ -959,7 +976,9 @@ class PPOTrainingServerBackend:
             # episodes into individual per-turn training samples, the gen_batch_output
             # batch size is larger than the original batch. We need to expand the
             # original batch to match using the expansion index.
-            expansion_index = gen_batch_output.meta_info.pop('per_turn_expansion_index', None)
+            expansion_index = gen_batch_output.meta_info.pop(
+                "per_turn_expansion_index", None
+            )
             if expansion_index is not None:
                 logger.info(
                     f"[Per-turn training] Expanding original batch from {len(batch)} to "
@@ -972,6 +991,7 @@ class PPOTrainingServerBackend:
                 elif batch.batch is not None:
                     # Empty TensorDict (all keys were popped) — create new one with expanded size
                     from tensordict import TensorDict
+
                     batch.batch = TensorDict({}, batch_size=[len(expansion_index)])
                 # Expand non-tensor batch
                 expanded_non_tensor = {}
@@ -1186,13 +1206,41 @@ class PPOTrainingServerBackend:
                     )
                     metrics.update(critic_output_metrics)
 
-            # 10.5 Compute observation_mask for world model loss
+            # 10.5 Build observation_mask for world model loss
+            # Prefer fine-grained mask from agent loop (only pure env feedback tokens)
+            # Fall back to coarse mask (all non-action response tokens) if not available
             if self.wm_coeff > 0:
                 resp_len = batch.batch["response_mask"].shape[1]
-                attn_response = batch.batch["attention_mask"][:, -resp_len:]
-                batch.batch["observation_mask"] = (
-                    attn_response.bool() & ~batch.batch["response_mask"].bool()
-                ).float()
+                if "observation_mask" in batch.non_tensor_batch:
+                    # Fine-grained mask from agent loop: 1 = pure env feedback only
+                    obs_mask_lists = batch.non_tensor_batch["observation_mask"]
+                    padded = []
+                    for m in obs_mask_lists:
+                        m = list(m) if m is not None else []
+                        if len(m) < resp_len:
+                            m = m + [0] * (resp_len - len(m))
+                        else:
+                            m = m[:resp_len]
+                        padded.append(m)
+                    batch.batch["observation_mask"] = torch.tensor(
+                        padded,
+                        dtype=torch.float32,
+                        device=batch.batch["response_mask"].device,
+                    )
+                    logger.info(
+                        f"[WM] Using fine-grained observation_mask from agent loop "
+                        f"(env_feedback_tokens={batch.batch['observation_mask'].sum().item():.0f})"
+                    )
+                else:
+                    # Fallback: all non-action tokens in response portion
+                    attn_response = batch.batch["attention_mask"][:, -resp_len:]
+                    batch.batch["observation_mask"] = (
+                        attn_response.bool() & ~batch.batch["response_mask"].bool()
+                    ).float()
+                    logger.info(
+                        f"[WM] Using coarse observation_mask (all non-action tokens, "
+                        f"total={batch.batch['observation_mask'].sum().item():.0f})"
+                    )
 
             # 11. Update actor (check critic warmup)
             if self.config.trainer.critic_warmup <= self.global_steps:
@@ -1281,6 +1329,23 @@ class PPOTrainingServerBackend:
                         continue
 
             logger.info(f"Training step {self.global_steps} completed successfully")
+
+            # Free large intermediates to prevent Ray object store spilling to disk
+            del batch, gen_batch, gen_batch_output, reward_tensor
+            if "old_log_prob" in dir():
+                del old_log_prob
+            if "ref_log_prob" in dir():
+                del ref_log_prob
+            if "values" in dir():
+                del values
+            if "actor_output" in dir():
+                del actor_output
+            if "critic_output" in dir():
+                del critic_output
+            import gc
+
+            gc.collect()
+            torch.cuda.empty_cache()
 
             return {
                 "status": "success",
@@ -1559,7 +1624,9 @@ class PPOTrainingServerBackend:
 
             # 6. Merge original batch and generated output
             # Per-turn training expansion: expand batch if gen output is larger
-            expansion_index = gen_batch_output.meta_info.pop('per_turn_expansion_index', None)
+            expansion_index = gen_batch_output.meta_info.pop(
+                "per_turn_expansion_index", None
+            )
             if expansion_index is not None:
                 logger.info(
                     f"[Per-turn training] Validation: Expanding original batch from {len(batch)} to "
@@ -1571,6 +1638,7 @@ class PPOTrainingServerBackend:
                 elif batch.batch is not None:
                     # Empty TensorDict (all keys were popped) — create new one with expanded size
                     from tensordict import TensorDict
+
                     batch.batch = TensorDict({}, batch_size=[len(expansion_index)])
                 expanded_non_tensor = {}
                 for k, v in batch.non_tensor_batch.items():

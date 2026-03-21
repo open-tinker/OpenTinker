@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# Usage: ./run.sh [config] [gpus] [scheduler_port] [env_port] [steps] [model] [mode] [wm_coeff]
+# Usage: ./run.sh [config] [gpus] [scheduler_port] [env_port] [steps] [model] [mode] [wm_coeff] [wm_top_ratio]
 # Example:
 #   ./run.sh                                          # all defaults
 #   ./run.sh alfworld_param 4,5 8782 8110 150
-#   ./run.sh alfworld_param 4,5 8782 8110 150 Qwen/Qwen2.5-3B-Instruct grpo_wm 0.1
+#   ./run.sh alfworld_param 4,5 8782 8110 150 Qwen/Qwen2.5-3B-Instruct grpo_wm 0.1 0.1
 # Modes:
 #   grpo     : standard GRPO
 #   grpo_wm  : GRPO + world model SFT loss (adds +world_model_coeff=wm_coeff)
@@ -17,6 +17,7 @@ STEPS="${5:-600}"
 MODEL="${6:-Qwen/Qwen2.5-3B-Instruct}"
 MODE="${7:-grpo}"
 WM_COEFF="${8:-0.1}"
+WM_TOP_RATIO="${9:-}"
 
 # Normalize GPU list so Hydra always receives a clean list override.
 # Accepted input forms: "4,6" or "[4,6]".
@@ -45,7 +46,12 @@ case "$MODE" in
     ;;
   grpo_wm|grpo+wm|wm|wm_sft)
     EXTRA_HYDRA_ARGS+=("+world_model_coeff=${WM_COEFF}")
-    MODE_TAG="grpo_wm_${WM_COEFF}"
+    if [[ -n "${WM_TOP_RATIO:-}" ]]; then
+      EXTRA_HYDRA_ARGS+=("+wm_loss_top_ratio=${WM_TOP_RATIO}")
+      MODE_TAG="grpo_wm_${WM_COEFF}_top${WM_TOP_RATIO}"
+    else
+      MODE_TAG="grpo_wm_${WM_COEFF}"
+    fi
     ;;
   *)
     echo "Unsupported mode: $MODE"

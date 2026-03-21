@@ -115,6 +115,9 @@ class GenericAgentData:
         self.prompt_ids: list[int] = []
         self.response_ids: list[int] = []
         self.response_mask: list[int] = []
+        self.observation_mask: list[
+            int
+        ] = []  # 1 for pure env feedback tokens, 0 otherwise
         self.response_logprobs: list[float] = []
 
         # Turn tracking
@@ -224,7 +227,9 @@ class GenericAgentLoop(AgentLoopBase):
             # Create per-job subdirectory to isolate traces from different client tasks
             job_id = os.environ.get("ROLLOUT_TRACE_JOB_ID", None)
             if job_id:
-                cls._trace_output_dir = str(Path(cls._trace_output_dir) / f"job_{job_id}")
+                cls._trace_output_dir = str(
+                    Path(cls._trace_output_dir) / f"job_{job_id}"
+                )
             cls._save_traces = True
             cls._process_id = os.getpid()  # Store process ID for unique trace naming
             Path(cls._trace_output_dir).mkdir(parents=True, exist_ok=True)
@@ -465,6 +470,9 @@ class GenericAgentLoop(AgentLoopBase):
         # Ensure env_info exists for all samples (even if empty) for consistent DataProto.concat
         output.extra_fields["env_info"] = agent_data.extra_fields.get("env_info", [])
         output.extra_fields["turn_scores"] = agent_data.turn_scores
+        output.extra_fields["observation_mask"] = agent_data.observation_mask[
+            : self.response_length
+        ]
         # Add any other extra fields (except the ones we already set)
         for key, value in agent_data.extra_fields.items():
             if key not in output.extra_fields:
@@ -581,6 +589,9 @@ class GenericAgentLoop(AgentLoopBase):
         agent_data.response_mask += [1] * len(
             agent_data.response_ids
         )  # mask=1 for LLM tokens
+        agent_data.observation_mask += [0] * len(
+            agent_data.response_ids
+        )  # observation_mask=0 for action tokens
 
         if response_log_probs:
             agent_data.response_logprobs += response_log_probs
@@ -684,6 +695,14 @@ class GenericAgentLoop(AgentLoopBase):
         agent_data.prompt_ids += response_ids
         agent_data.response_mask += [0] * len(response_ids)
 
+        # Build observation_mask: 1 only for pure env feedback tokens
+        # (excludes chat template, "=== Current State ===", "=== Available Actions ===" etc.)
+        raw_obs = info.get("raw_obs", None) if info else None
+        obs_mask = self._build_env_feedback_mask(
+            response_ids, observation, raw_obs, self.tokenizer
+        )
+        agent_data.observation_mask += obs_mask
+
         if agent_data.response_logprobs:
             # Pad logprobs with 0.0 for observation tokens
             agent_data.response_logprobs += [0.0] * len(response_ids)
@@ -692,6 +711,68 @@ class GenericAgentLoop(AgentLoopBase):
             return GenericAgentState.TERMINATED
         else:
             return GenericAgentState.GENERATING
+
+    @staticmethod
+    def _build_env_feedback_mask(
+        response_ids: list[int],
+        observation: str,
+        raw_obs: str | None,
+        tokenizer,
+    ) -> list[int]:
+        """Build a per-token mask marking only pure environment feedback tokens.
+
+        Uses character-offset mapping to avoid BPE boundary mismatch:
+        1. Tokenize the full observation string with offset_mapping
+        2. Find raw_obs character range within observation
+        3. Map character range → token indices in observation encoding
+        4. Find observation tokens as contiguous subsequence in response_ids
+           (response_ids = chat_template_prefix + obs_tokens + chat_template_suffix)
+        5. Transfer the per-token mask to response_ids positions
+
+        Falls back to all-1 mask if any step fails.
+        """
+        n = len(response_ids)
+        if not raw_obs or not observation:
+            return [1] * n
+
+        # Step 1-2: find raw_obs character range in the formatted observation
+        char_start = observation.find(raw_obs)
+        if char_start < 0:
+            return [1] * n
+        char_end = char_start + len(raw_obs)
+
+        # Step 3: tokenize observation with offset mapping
+        try:
+            enc = tokenizer(
+                observation, add_special_tokens=False, return_offsets_mapping=True
+            )
+            obs_ids = enc["input_ids"]
+            offsets = enc["offset_mapping"]
+        except Exception:
+            # Tokenizer doesn't support offset_mapping; fall back
+            return [1] * n
+
+        # Mark which observation-level tokens overlap with raw_obs char range
+        obs_level_mask = []
+        for s, e in offsets:
+            if e > char_start and s < char_end:
+                obs_level_mask.append(1)
+            else:
+                obs_level_mask.append(0)
+
+        # Step 4: find obs_ids as contiguous subsequence in response_ids
+        # (chat template special tokens don't merge with content tokens)
+        m = len(obs_ids)
+        for i in range(n - m + 1):
+            if response_ids[i : i + m] == obs_ids:
+                # Step 5: transfer mask
+                mask = [0] * n
+                for j in range(m):
+                    mask[i + j] = obs_level_mask[j]
+                return mask
+
+        # obs_ids not found in response_ids — fall back
+        return [1] * n
 
     async def _save_debug_images(self, image_data: list, request_id: str):
         """Save debug images to disk when SAVE_DEBUG_IMAGES env var is set.
