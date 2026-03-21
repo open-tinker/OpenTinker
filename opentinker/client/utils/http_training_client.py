@@ -625,6 +625,32 @@ class ServiceClient:
             }
         )
 
+        # Optional world model SFT coefficient for joint PPO + WM training.
+        world_model_coeff = args.get("world_model_coeff", None)
+        if world_model_coeff is not None:
+            server_cfg = OmegaConf.merge(
+                server_cfg,
+                OmegaConf.create(
+                    {"algorithm": {"world_model_coeff": float(world_model_coeff)}}
+                ),
+            )
+            print(
+                f"[ServiceClient] Forwarding algorithm.world_model_coeff={world_model_coeff}"
+            )
+
+        # Optional WM loss sparsification ratio
+        wm_loss_top_ratio = args.get("wm_loss_top_ratio", None)
+        if wm_loss_top_ratio is not None:
+            server_cfg = OmegaConf.merge(
+                server_cfg,
+                OmegaConf.create(
+                    {"algorithm": {"wm_loss_top_ratio": float(wm_loss_top_ratio)}}
+                ),
+            )
+            print(
+                f"[ServiceClient] Forwarding algorithm.wm_loss_top_ratio={wm_loss_top_ratio}"
+            )
+
         # Add multi_turn config if present in args
         if hasattr(args, "multi_turn") and args.multi_turn:
             multi_turn_cfg = OmegaConf.to_container(args.multi_turn, resolve=True)
@@ -644,7 +670,11 @@ class ServiceClient:
             server_cfg = OmegaConf.merge(
                 server_cfg,
                 OmegaConf.create(
-                    {"actor_rollout_ref": {"rollout": {"agent": {"num_workers": agent_num_workers}}}}
+                    {
+                        "actor_rollout_ref": {
+                            "rollout": {"agent": {"num_workers": agent_num_workers}}
+                        }
+                    }
                 ),
             )
             print(

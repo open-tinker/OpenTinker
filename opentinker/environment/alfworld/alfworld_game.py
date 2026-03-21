@@ -522,6 +522,7 @@ class ALFWorldGame(AbstractGame):
                 # Note: Don't include "step" here as gym_environment_interaction.py
                 # already passes it explicitly to observation_template.format()
                 "raw_reward": float(reward),
+                "raw_obs": obs,  # raw env feedback (before _format_observation)
                 "action_taken": parsed_action,
                 "task": self._task_desc,
                 "won": won_flag,
