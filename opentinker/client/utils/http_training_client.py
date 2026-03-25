@@ -638,17 +638,27 @@ class ServiceClient:
             }
         )
         
+        # Pass WMC-ERC config to server if present
+        wmc_erc_cfg = getattr(args, "wmc_erc", None)
+        if wmc_erc_cfg is not None:
+            wmc_erc_dict = OmegaConf.to_container(wmc_erc_cfg, resolve=True)
+            server_cfg = OmegaConf.merge(
+                server_cfg,
+                OmegaConf.create({"wmc_erc": wmc_erc_dict}),
+            )
+            print(f"[ServiceClient] Passing WMC-ERC config to server: {wmc_erc_dict}")
+        
         # Optional world model SFT coefficient for joint PPO + WM training.
-        world_model_coeff = args.get("world_model_coeff", None)
-        if world_model_coeff is not None:
+        if hasattr(args, "world_model_loss") and args.world_model_loss:
+            world_model_loss_cfg = OmegaConf.to_container(args.world_model_loss, resolve=True)
             server_cfg = OmegaConf.merge(
                 server_cfg,
                 OmegaConf.create(
-                    {"algorithm": {"world_model_coeff": float(world_model_coeff)}}
+                    {"algorithm": {"world_model_loss": world_model_loss_cfg}}
                 ),
             )
             print(
-                f"[ServiceClient] Forwarding algorithm.world_model_coeff={world_model_coeff}"
+                f"[ServiceClient] Passing world_model_loss config to server: {world_model_loss_cfg}"
             )
 
         # Add multi_turn config if present in args

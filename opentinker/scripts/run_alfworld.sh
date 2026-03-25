@@ -74,7 +74,7 @@ case "$1" in
         echo "Step 3: Starting ALFWorld RL Client"
         echo "========================================"
         python opentinker/client/alfworld_rl.py \
-            --config-name alfworld_wmc_erc_param \
+            --config-name alfworld_wm_loss_clip_param \
             tokenizer_path="$MODEL_PATH" \
             batch_size=4 \
             val_batch_size=50 \

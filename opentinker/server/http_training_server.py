@@ -27,6 +27,7 @@ Key Features:
 
 import asyncio
 import base64
+import gc
 import logging
 import signal
 import sys
@@ -620,6 +621,7 @@ class PPOTrainingServerBackend:
         self.resource_pool_manager = resource_pool_manager
         self.reward_fn = reward_fn
         self.val_reward_fn = val_reward_fn
+        self.running_stats: Dict[str, float] = dict()
 
         # Initialize trainer (without dataloader - client provides custom dataloader)
         from verl.single_controller.ray import RayWorkerGroup
@@ -677,16 +679,31 @@ class PPOTrainingServerBackend:
             Status dict
         """
         try:
+            # Reset server state for new training session
+            self.global_steps = 0
+            self.running_stats.clear()
+            logger.info("Reset server state (global_steps and running_stats) for new worker initialization")
+
             # optimizer needs parameter: total_steps
             self.trainer.post_init(total_steps)
 
             # Forward algorithm.world_model_coeff → actor config so dp_actor can read it
-            algo_wm_coeff = self.config.algorithm.get("world_model_coeff", 0.0)
+            if hasattr(self.config.algorithm, "world_model_loss"):
+                algo_wm_coeff = self.config.algorithm.world_model_loss.get("world_model_coeff", 0.0)
+                algo_wm_annealing_steps = self.config.algorithm.world_model_loss.get("world_model_annealing_steps", 0)
+                algo_wm_annealing_end_factor = self.config.algorithm.world_model_loss.get("world_model_annealing_end_factor", 1.0)
+            else:
+                algo_wm_coeff = 0
+                algo_wm_annealing_steps = 0
+                algo_wm_annealing_end_factor = 0
+            
             if algo_wm_coeff > 0:
                 from omegaconf import open_dict
                 with open_dict(self.config):
                     self.config.actor_rollout_ref.actor.world_model_coeff = algo_wm_coeff
-                logger.info(f"Forwarded world_model_coeff={algo_wm_coeff} to actor config")
+                    self.config.actor_rollout_ref.actor.world_model_annealing_steps = algo_wm_annealing_steps
+                    self.config.actor_rollout_ref.actor.world_model_annealing_end_factor = algo_wm_annealing_end_factor
+                logger.info(f"Forwarded world_model_coeff={algo_wm_coeff} (annealing_steps={algo_wm_annealing_steps}) to actor config")
 
             logger.info("Initializing workers...")
 
@@ -1096,6 +1113,7 @@ class PPOTrainingServerBackend:
                 # ===== DEBUG LOGGING END =====
 
                 metrics.update(old_log_prob_metrics)
+                _wmc_erc_entropys = entropys  # Preserve for WMC-ERC before pop
                 old_log_prob.batch.pop("entropys")
                 batch = batch.union(old_log_prob)
                 logger.info(
@@ -1176,6 +1194,24 @@ class PPOTrainingServerBackend:
                     norm_adv_by_std_in_grpo=norm_adv_by_std_in_grpo,
                     config=self.config.algorithm,
                 )
+
+            # 9.5 WMC-ERC: Dynamic entropy clipping
+            wmc_erc_cfg = OmegaConf.select(self.config, "wmc_erc", default=None)
+            if wmc_erc_cfg and wmc_erc_cfg.get("enable", False):
+                from opentinker.backend_patch.verl.trainer.ppo.wmc_erc import (
+                    apply_wmc_erc,
+                )
+
+                batch, wmc_metrics = apply_wmc_erc(
+                    batch, _wmc_erc_entropys, wmc_erc_cfg, self.running_stats
+                )
+                metrics.update(wmc_metrics)
+                logger.info(
+                    f"[WMC-ERC] mask_ratio={float(wmc_metrics.get('wmc_erc/mask_ratio', float('nan'))):.3f}, "
+                    f"s_star={float(wmc_metrics.get('wmc_erc/s_star_mean', float('nan'))):.4f}, "
+                    f"h_wm={float(wmc_metrics.get('wmc_erc/h_wm_mean', float('nan'))):.4f}"
+                )
+
 
             # 10. Update critic
             if self.use_critic:
@@ -1281,6 +1317,26 @@ class PPOTrainingServerBackend:
                         continue
 
             logger.info(f"Training step {self.global_steps} completed successfully")
+
+            # Free large intermediates and force garbage collection to prevent OOM
+            # Explicitly delete all potential large objects in local scope
+            del batch, gen_batch, gen_batch_output, reward_tensor
+            if "old_log_prob" in locals():
+                del old_log_prob
+            if "ref_log_prob" in locals():
+                del ref_log_prob
+            if "values" in locals():
+                del values
+            if "gen_baseline_output" in locals():
+                del gen_baseline_output
+            if "gen_baseline_batch" in locals():
+                del gen_baseline_batch
+            
+            if "_wmc_erc_entropys" in locals():
+                del _wmc_erc_entropys
+            
+            gc.collect()
+            torch.cuda.empty_cache()
 
             return {
                 "status": "success",

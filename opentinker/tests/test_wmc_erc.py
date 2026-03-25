@@ -145,6 +145,87 @@ class TestWmcErc(unittest.TestCase):
                                    s_bar=s_bar, sigma=sigma, clipping_method="mask")
         self.assertEqual(mask[0][0], 0.0)
 
+    def test_clip_positive_only(self):
+        """Verify that clip_positive_only only affects positive advantages."""
+        # Two turns to create variance so s_t != s_bar
+        response_mask = torch.tensor([[1, 0, 1, 0]], dtype=torch.float32)
+        attention_mask = torch.ones(1, 4, dtype=torch.float32)
+        # Turn 1 adv = 10, Turn 2 adv = -10
+        advantages = torch.tensor([[10.0, 0.0, -10.0, 0.0]])
+        # Make turn 1 very confident (p=0.9), turn 2 very uncertain (p=0.1)
+        old_log_probs = torch.tensor([[np.log(0.9), 0.0, np.log(0.1), 0.0]])
+        entropys = torch.tensor([[0.1, 0.0, 2.0, 0.0]])
+        
+        batch = self._make_batch(advantages, response_mask, old_log_probs, attention_mask)
+        
+        # Force a mask (m_t = 0.0) by setting very tight mu
+        config = {
+            "mu_base": 0.0001, 
+            "mu_exp": 0.0001, 
+            "lambda_wm": 0.0, 
+            "enable": True, 
+            "clipping_type": "batch",
+            "clip_positive_only": True
+        }
+        running_stats = {"initialized": False}
+        
+        _, metrics = apply_wmc_erc(batch, entropys, config, running_stats)
+        
+        # If masked, turn 1 (positive adv) should be 0.0, turn 2 (negative adv) should remain -10.0
+        self.assertEqual(batch.batch["advantages"][0, 0].item(), 0.0)
+        self.assertEqual(batch.batch["advantages"][0, 2].item(), -10.0)
+
+    def test_inverse_sft_mask(self):
+        """Verify that inverse_sft_mask correctly computes sft_weights on env tokens."""
+        # Seq: [Action1, Env1, Action2, Env2] -> masks: response_mask=[1, 0, 1, 0], attention=[1, 1, 1, 1]
+        response_mask = torch.tensor([[1, 0, 1, 0]], dtype=torch.float32)
+        attention_mask = torch.ones(1, 4, dtype=torch.float32)
+        advantages = torch.tensor([[2.0, 2.0, 2.0, 2.0]])
+        old_log_probs = torch.tensor([[np.log(0.5)] * 4])
+        entropys = torch.tensor([[1.0] * 4])
+        
+        batch = self._make_batch(advantages, response_mask, old_log_probs, attention_mask)
+        
+        # Force m_t = 0.0 for turn 0, m_t = 1.0 for turn 1
+        # Turn 0 S* = 0.5 * (1.0 + log(0.5)) ~ 0.15
+        # We can just let compute_dynamic_mask do its thing.
+        # Actually, let's just test that the weights are assigned correctly based on whatever mask is generated.
+        config = {
+            "mu_base": 0.001, # Force masking
+            "mu_exp": 0.001,
+            "lambda_wm": 0.0,
+            "enable": True,
+            "clipping_type": "batch",
+            "inverse_sft_mask": True
+        }
+        running_stats = {"initialized": False}
+        
+        _, metrics = apply_wmc_erc(batch, entropys, config, running_stats)
+        
+        self.assertIn("sft_weights", batch.batch)
+        sft_weights = batch.batch["sft_weights"]
+        
+        # Check shapes
+        self.assertEqual(sft_weights.shape, advantages.shape)
+        
+        # m_t is applied to advantages. Action1 (idx 0), Action2 (idx 2)
+        # Env1 (idx 1), Env2 (idx 3)
+        # If Action1 was masked (m_t=0), Env1 should have weight 1.0
+        # If Action1 was not masked (m_t=1), Env1 should have weight 0.0
+        
+        adv_action1 = batch.batch["advantages"][0, 0].item()
+        m_t_1 = adv_action1 / 2.0 # original advantage was 2.0
+        weight_env1 = sft_weights[0, 1].item()
+        self.assertAlmostEqual(weight_env1, 1.0 - m_t_1)
+        
+        adv_action2 = batch.batch["advantages"][0, 2].item()
+        m_t_2 = adv_action2 / 2.0
+        weight_env2 = sft_weights[0, 3].item()
+        self.assertAlmostEqual(weight_env2, 1.0 - m_t_2)
+        
+        # Ensure action tokens have 0 sft weight
+        self.assertEqual(sft_weights[0, 0].item(), 0.0)
+        self.assertEqual(sft_weights[0, 2].item(), 0.0)
 
 if __name__ == "__main__":
     unittest.main()

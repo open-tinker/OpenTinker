@@ -82,6 +82,8 @@ def compute_s_star(
             if count > 0:
                 p_k = torch.exp(log_p)
                 s_token = p_k * (H + log_p)
+                # Handle potential NaN due to 0 * -inf when p_k is 0 and log_p is -inf
+                s_token = torch.nan_to_num(s_token, nan=0.0)
                 s_t = (s_token * mask).sum() / count
             else:
                 s_t = torch.tensor(0.0, device=device)
@@ -205,7 +207,8 @@ def compute_dynamic_mask(
                 else: # PPO-style clipping
                     # If diff > threshold, we scale the advantage by threshold/diff
                     # such that the effective update is capped at threshold
-                    m_t = min(1.0, threshold / (diff + 1e-8))
+                    u_t = min(1.0, diff / (threshold + 1e-8))
+                    m_t = 1.0 / (1.0 + 0.5 * u_t)
             else:
                 # Exploration side
                 threshold = mu_exp * h_factor * sigma
@@ -213,7 +216,7 @@ def compute_dynamic_mask(
                 if clipping_method == "mask":
                     m_t = 1.0 if diff <= threshold else 0.0
                 else: # PPO-style clipping
-                    m_t = min(1.0, threshold / (diff + 1e-8))
+                    m_t = 1.0
                 
             masks.append(m_t)
         mask_per_sample.append(masks)
@@ -244,6 +247,8 @@ def apply_wmc_erc(
 
     clipping_type = wmc_erc_config.get("clipping_type", "batch") if hasattr(wmc_erc_config, 'get') else getattr(wmc_erc_config, 'clipping_type', "batch")
     clipping_method = wmc_erc_config.get("clipping_method", "mask") if hasattr(wmc_erc_config, 'get') else getattr(wmc_erc_config, 'clipping_method', "mask")
+    clip_positive_only = wmc_erc_config.get("clip_positive_only", False) if hasattr(wmc_erc_config, 'get') else getattr(wmc_erc_config, 'clip_positive_only', False)
+    inverse_sft_mask = wmc_erc_config.get("inverse_sft_mask", False) if hasattr(wmc_erc_config, 'get') else getattr(wmc_erc_config, 'inverse_sft_mask', False)
 
     response_mask = batch.batch["response_mask"]
     old_log_probs = batch.batch["old_log_probs"]
@@ -272,11 +277,10 @@ def apply_wmc_erc(
     
     # Update global statistics
     momentum = wmc_erc_config.get("momentum", 0.9) if hasattr(wmc_erc_config, 'get') else getattr(wmc_erc_config, 'momentum', 0.9)
-    if not running_stats.get("initialized", False):
+    if len(running_stats.keys()) == 0:
         running_stats["s_bar"] = batch_s_bar
         running_stats["s_std"] = batch_s_std
         running_stats["h_bar"] = batch_h_bar
-        running_stats["initialized"] = True
     else:
         running_stats["s_bar"] = (1 - momentum) * batch_s_bar + momentum * running_stats["s_bar"]
         running_stats["s_std"] = (1 - momentum) * batch_s_std + momentum * running_stats["s_std"]
@@ -307,11 +311,38 @@ def apply_wmc_erc(
 
     # 5. Apply mask/coeff to advantages
     batch_size = advantages.shape[0]
+    
+    if inverse_sft_mask:
+        sft_weights = torch.zeros_like(advantages)
+        env_mask = attention_mask_response * (1.0 - response_mask)
+        
     for i in range(batch_size):
         for t, (start, end) in enumerate(turn_boundaries[i]):
             if t < len(mask[i]):
-                advantages[i, start:end] *= mask[i][t]
+                m_t = mask[i][t]
+                
+                if inverse_sft_mask:
+                    # Env tokens after this turn: [end, next_turn_start) or [end, seq_len)
+                    if t + 1 < len(turn_boundaries[i]):
+                        env_end = turn_boundaries[i][t + 1][0]
+                    else:
+                        env_end = response_length
+                        
+                    sft_weight = 1.0 - m_t
+                    region_mask = env_mask[i, end:env_end]
+                    sft_weights[i, end:env_end] = region_mask * sft_weight
+                
+                if m_t < 1.0:
+                    if clip_positive_only:
+                        # Only apply scaling where advantages > 0
+                        turn_adv = advantages[i, start:end]
+                        advantages[i, start:end] = torch.where(turn_adv > 0, turn_adv * m_t, turn_adv)
+                    else:
+                        advantages[i, start:end] *= m_t
     batch.batch["advantages"] = advantages
+    
+    if inverse_sft_mask:
+        batch.batch["sft_weights"] = sft_weights
 
     # 6. Metrics
     all_m = [m for turns in mask for m in turns]

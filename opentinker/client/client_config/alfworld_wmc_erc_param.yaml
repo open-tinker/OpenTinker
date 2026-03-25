@@ -9,7 +9,7 @@
 
 # Project settings
 project_name: opentinker
-experiment_name: alfworld_wmc_erc_part_mask
+experiment_name: alfworld_wmc_erc_clip
 
 # Logging
 logger_backends: ["console", "wandb"]
@@ -23,6 +23,7 @@ wandb_key: null
 
 # Model and tokenizer
 tokenizer_path: null
+enable_sleep_mode: false
 
 # Training parameters
 batch_size: 8
@@ -55,17 +56,26 @@ rollout_n: 8
 # - lambda_wm: exponential decay factor for WM uncertainty (higher H_WM -> smaller gate)
 # - clipping_type: "batch" or "global" (global uses running statistics)
 # - clipping_method: "mask" (0/1 gating) or "clip" (PPO-style soft clipping)
+# - clip_positive_only: if true, only apply clipping to tokens with positive advantages
+# - inverse_sft_mask: if true, use (1 - m_t) as weights for SFT loss on subsequent env tokens
 # - momentum: momentum for running statistics (only used if clipping_type is "global")
 # - enable: master switch
 wmc_erc:
   enable: true
   mu_base: 1.0
-  mu_exp: 2.0
-  eta_wm: 3.0
+  mu_exp: 3.0
+  eta_wm: 2.0
   lambda_wm: 1.0
   clipping_type: "global"
-  clipping_method: "mask"
+  clipping_method: "clip"
+  clip_positive_only: false
+  inverse_sft_mask: false
   momentum: 0.9
+
+# World Model SFT loss: predict environment observation tokens as auxiliary task
+world_model_coeff: 0.0
+world_model_annealing_steps: 0
+world_model_annealing_end_factor: 1.0
 
 # Interaction configuration
 interaction:

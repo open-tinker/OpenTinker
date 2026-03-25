@@ -3,7 +3,7 @@
 
 # Project settings
 project_name: opentinker
-experiment_name: alfworld_training
+experiment_name: alfworld_training_baseline_grpo
 
 # Logging
 logger_backends: ["console", "wandb"]

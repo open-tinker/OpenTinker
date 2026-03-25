@@ -23,6 +23,7 @@ wandb_key: null
 
 # Model and tokenizer
 tokenizer_path: null
+enable_sleep_mode: false
 
 # Training parameters
 batch_size: 8

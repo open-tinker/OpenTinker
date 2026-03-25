@@ -64,7 +64,13 @@ def main(cfg):
 
         cfg.actor_rollout_ref.rollout.tensor_model_parallel_size = 2
         cfg.actor_rollout_ref.rollout.name = "vllm"
-        cfg.actor_rollout_ref.rollout.gpu_memory_utilization = 0.6
+        cfg.actor_rollout_ref.rollout.gpu_memory_utilization = 0.4
+        # # vLLM sleep mode setting
+        # if "enable_sleep_mode" in cfg:
+        #     cfg.actor_rollout_ref.rollout.free_cache_engine = cfg.enable_sleep_mode
+        # else:
+        #     # Default to False if not specified (per user request to ensure it doesn't start)
+        #     cfg.actor_rollout_ref.rollout.free_cache_engine = False
 
         # GRPO/GRPO-per-step 特定配置
         # grpo_per_step uses the same training framework as grpo, just with different advantage estimation
