@@ -638,6 +638,11 @@ class GenericAgentLoop(AgentLoopBase):
         if reward is not None:
             agent_data.turn_scores.append(reward)
 
+        # Store per-turn observation text for RWML reward computation
+        if "turn_observations" not in agent_data.extra_fields:
+            agent_data.extra_fields["turn_observations"] = []
+        agent_data.extra_fields["turn_observations"].append(observation)
+
         # Store environment info under a SINGLE key to ensure consistent structure
         # across all samples (avoids DataProto.concat assertion errors when different
         # samples return different info keys)

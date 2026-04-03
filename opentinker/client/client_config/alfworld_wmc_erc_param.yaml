@@ -77,6 +77,20 @@ world_model_coeff: 0.0
 world_model_annealing_steps: 0
 world_model_annealing_end_factor: 1.0
 
+# RWML: Reinforcement World Model Learning (arxiv:2602.05842)
+# Computes per-turn rewards based on text embedding similarity between the
+# model's predicted next observation (argmax at obs token positions) and the
+# actual environment observation. Binary reward: 1.0 if (1-cos_sim) < tau_d.
+# - enable: master switch
+# - embedding_model: HuggingFace model for text embeddings
+# - tau_d: distance threshold (paper uses 0.2 for ALFWorld)
+# - coeff: weight when combining RWML reward with task success reward
+rwml:
+  enable: false
+  embedding_model: "Alibaba-NLP/gte-large-en-v1.5"
+  tau_d: 0.2
+  coeff: 1.0
+
 # Interaction configuration
 interaction:
   name: alfworld
