@@ -48,7 +48,7 @@ class EmbeddingSimilarityReward:
     def __init__(self, model_name_or_path: str, device: str = "cpu"):
         from sentence_transformers import SentenceTransformer
 
-        self.model = SentenceTransformer(model_name_or_path, device=device)
+        self.model = SentenceTransformer(model_name_or_path, device=device, trust_remote_code=True)
         self.device = device
 
     @torch.no_grad()
