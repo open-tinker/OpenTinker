@@ -46,9 +46,19 @@ class EmbeddingSimilarityReward:
     """
 
     def __init__(self, model_name_or_path: str, device: str = "cpu"):
+        import os
         from sentence_transformers import SentenceTransformer
 
-        self.model = SentenceTransformer(model_name_or_path, device=device, trust_remote_code=True)
+        # Use local cache without network access (offline-friendly)
+        prev_offline = os.environ.get("HF_HUB_OFFLINE")
+        os.environ["HF_HUB_OFFLINE"] = "1"
+        try:
+            self.model = SentenceTransformer(model_name_or_path, device=device, trust_remote_code=True)
+        finally:
+            if prev_offline is None:
+                os.environ.pop("HF_HUB_OFFLINE", None)
+            else:
+                os.environ["HF_HUB_OFFLINE"] = prev_offline
         self.device = device
 
     @torch.no_grad()
