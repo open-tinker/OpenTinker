@@ -648,6 +648,16 @@ class ServiceClient:
             )
             print(f"[ServiceClient] Passing WMC-ERC config to server: {wmc_erc_dict}")
         
+        # Pass RWML config to server if present
+        rwml_cfg = getattr(args, "rwml", None)
+        if rwml_cfg is not None:
+            rwml_dict = OmegaConf.to_container(rwml_cfg, resolve=True)
+            server_cfg = OmegaConf.merge(
+                server_cfg,
+                OmegaConf.create({"rwml": rwml_dict}),
+            )
+            print(f"[ServiceClient] Passing RWML config to server: {rwml_dict}")
+
         # Optional world model SFT coefficient for joint PPO + WM training.
         if hasattr(args, "world_model_loss") and args.world_model_loss:
             world_model_loss_cfg = OmegaConf.to_container(args.world_model_loss, resolve=True)
