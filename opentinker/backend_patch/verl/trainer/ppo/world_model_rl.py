@@ -49,17 +49,41 @@ class EmbeddingSimilarityReward:
         import os
         from sentence_transformers import SentenceTransformer
 
-        # Use local cache without network access (offline-friendly)
-        prev_offline = os.environ.get("HF_HUB_OFFLINE")
-        os.environ["HF_HUB_OFFLINE"] = "1"
-        try:
-            self.model = SentenceTransformer(model_name_or_path, device=device, trust_remote_code=True)
-        finally:
-            if prev_offline is None:
-                os.environ.pop("HF_HUB_OFFLINE", None)
-            else:
-                os.environ["HF_HUB_OFFLINE"] = prev_offline
+        local_path = self._resolve_local_path(model_name_or_path)
+        self.model = SentenceTransformer(local_path, device=device, trust_remote_code=True)
         self.device = device
+
+    @staticmethod
+    def _resolve_local_path(model_name_or_path: str) -> str:
+        """Resolve a HF model ID to a local cache path if available.
+
+        If model_name_or_path is already a local directory, return it as-is.
+        Otherwise, look up the HF hub cache for a cached snapshot and return
+        its path to avoid any network access.
+        """
+        import os
+
+        if os.path.isdir(model_name_or_path):
+            return model_name_or_path
+
+        # Try to resolve from HF cache: ~/.cache/huggingface/hub/models--{org}--{name}/snapshots/{hash}
+        try:
+            from huggingface_hub import scan_cache_dir
+
+            cache_info = scan_cache_dir()
+            for repo in cache_info.repos:
+                if repo.repo_id == model_name_or_path:
+                    # Pick the most recent revision
+                    revisions = sorted(repo.revisions, key=lambda r: r.last_modified, reverse=True)
+                    if revisions:
+                        local = str(revisions[0].snapshot_path)
+                        print(f"[RWML] Resolved {model_name_or_path} to local cache: {local}")
+                        return local
+        except Exception:
+            pass
+
+        # Fallback: return as-is and let SentenceTransformer handle it
+        return model_name_or_path
 
     @torch.no_grad()
     def encode(self, texts: List[str]) -> torch.Tensor:
